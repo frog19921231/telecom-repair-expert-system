@@ -3,7 +3,7 @@ from neo4j import GraphDatabase
 
 # 1. 系統連線設定 (優先讀取 Secrets，若無則使用 AuraDB 預設參數)
 NEO4J_URI = st.secrets.get("NEO4J_URI", "neo4j+ssc://b8cec18b.databases.neo4j.io")
-NEO4J_USER = st.secrets.get("NEO4J_USER", "neo4j")
+NEO4J_USER = st.secrets.get("NEO4J_USER", "b8cec18b")
 NEO4J_PASSWORD = st.secrets.get("NEO4J_PASSWORD", "P9wY81fDEc8bT67wCIq6Z329QOhjh-HIcyzqrqDJ_TA")
 # 管理員驗證密碼（可於 Streamlit Secrets 自訂）
 ADMIN_PASSWORD = st.secrets.get("ADMIN_PASSWORD", "admin2026")
@@ -262,7 +262,3 @@ with tab_admin:
         st.error("❌ 密碼錯誤，拒絕存取維修管理功能。")
     else:
         st.info("🔒 此功能需要管理員權限，請先於上方輸入密碼。")
-                        st.rerun()
-                st.markdown("---")
-    elif admin_pwd != "":
-        st.error("密碼錯誤，拒絕存取。")

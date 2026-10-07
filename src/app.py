@@ -207,7 +207,11 @@ with tab_admin:
     if admin_pwd == ADMIN_PASSWORD:
         st.success("🔓 管理員身分已驗證，已解鎖資料庫管理權限。")
         
-        adm_subtab1, adm_subtab2 = st.tabs(["📝 維修處置 (Action) 編輯管理", "📥 待審核技師回報 (PendingFeedback)"])
+        adm_subtab1, adm_subtab2, adm_subtab3 = st.tabs([
+    "📝 維修處置與 SOP 編輯", 
+    "📥 待審核技師回報 (PendingFeedback)",
+    "⚠️ 統計次數重置 (危險操作)"
+])
 
         # ----------------------------------------------------
         # 子功能 1: 視覺化維修方法編輯管理 (管理員專屬)
@@ -313,6 +317,51 @@ with tab_admin:
                             st.warning("已駁回。")
                             st.rerun()
                     st.markdown("---")
+                    # ----------------------------------------------------
+        # 子功能 3: 統計次數重置與機率歸零 (雙重防誤觸)
+        # ----------------------------------------------------
+        with adm_subtab3:
+            st.markdown("### ⚠️ 故障原因統計計數歸零與機率重置")
+            st.caption("此操作將清空所有現場技師累積回報的維修次數，並將所有故障原因之先驗機率重置為基準均勻分佈。")
+
+            if "confirm_reset_stage" not in st.session_state:
+                st.session_state["confirm_reset_stage"] = False
+
+            if not st.session_state["confirm_reset_stage"]:
+                if st.button("🚨 申請重置所有統計數據", type="secondary"):
+                    st.session_state["confirm_reset_stage"] = True
+                    st.rerun()
+            else:
+                with st.container():
+                    st.error("🚨 **危險操作警告！**")
+                    st.write("您即將執行統計數據永久清空。請注意：此操作無法復原，所有已記錄的排查權重將回到初始狀態。")
+
+                    safety_checkbox = st.checkbox("我已充分理解此操作之後果，並確定要將所有統計計數歸零。")
+
+                    col_confirm, col_cancel = st.columns([1, 4])
+                    
+                    with col_confirm:
+                        if st.button("🔥 確認永久歸零", type="primary", disabled=not safety_checkbox):
+                            reset_cypher = """
+                            MATCH (s:Symptom)-[r:CAUSED_BY]->(rc:RootCause)
+                            SET r.count = 1
+                            WITH s
+                            MATCH (s)-[all_rel:CAUSED_BY]->(:RootCause)
+                            WITH s, sum(all_rel.count) AS total, collect(all_rel) AS list
+                            UNWIND list AS r
+                            SET r.prob = round((toFloat(r.count) / toFloat(total)) * 10000.0) / 10000.0
+                            """
+                            with driver.session() as s:
+                                s.run(reset_cypher)
+
+                            st.session_state["confirm_reset_stage"] = False
+                            st.success("✅ 統計計數已成功全數歸零，先驗機率已重新均勻化！")
+                            st.rerun()
+
+                    with col_cancel:
+                        if st.button("↩️ 取消操作"):
+                            st.session_state["confirm_reset_stage"] = False
+                            st.rerun()
 
     elif admin_pwd != "":
         st.error("❌ 密碼錯誤，拒絕存取維修管理功能。")

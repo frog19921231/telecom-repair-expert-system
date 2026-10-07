@@ -264,6 +264,27 @@ with tab_admin:
                         s.run(update_cypher, old_name=current_act["action_name"], new_name=new_action_text, new_time=new_time, tools=tools_list)
                     st.success(f"✅ 維修處置「{new_action_text}」已成功更新！")
                     st.rerun()
+                    # ----------------------------------------------------
+                # 刪除維修處置功能 (管理員專屬，附帶防誤觸機制)
+                # ----------------------------------------------------
+                st.markdown("---")
+                st.markdown("#### 🗑️ 刪除此項維修處置")
+                st.caption("注意：刪除後將移除該 Action 節點及其與工具、故障原因的關聯。")
+
+                del_confirm = st.checkbox(
+                    f"⚠️ 確認永久刪除處置【{current_act['action_name']}】？",
+                    key=f"del_chk_{current_act['action_name']}"
+                )
+
+                if st.button("🗑️ 執行刪除此處置", type="primary", disabled=not del_confirm):
+                    delete_cypher = """
+                    MATCH (a:Action {name: $act_name})
+                    DETACH DELETE a
+                    """
+                    with driver.session() as s:
+                        s.run(delete_cypher, act_name=current_act["action_name"])
+                    st.success(f"已成功從知識圖譜中刪除維修處置：【{current_act['action_name']}】！")
+                    st.rerun()
             else:
                 st.info("目前資料庫中尚無維修處置資料。")
 

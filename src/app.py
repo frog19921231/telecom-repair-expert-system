@@ -1,163 +1,116 @@
-﻿import json
-import requests
-import streamlit as st
+﻿import streamlit as st
 from neo4j import GraphDatabase
 
-NEO4J_URI = "bolt://localhost:7687"
-NEO4J_AUTH = ("neo4j", "repair2026")
-OLLAMA_URL = "http://localhost:11434/api/generate"
-MODEL_NAME = "qwen2.5:7b"
-
-st.set_page_config(page_title="通訊設備智能維修專家系統", page_icon="📞", layout="wide")
+# 1. 系統連線設定 (優先讀取 Secrets，若無則使用預設 AuraDB 連線)
+NEO4J_URI = st.secrets.get("NEO4J_URI", "neo4j+ssc://b8cec18b.databases.neo4j.io")
+NEO4J_USER = st.secrets.get("NEO4J_USER", "b8cec18b")
+NEO4J_PASSWORD = st.secrets.get("NEO4J_PASSWORD", "P9wY81fDEc8bT67wCIq6Z329QOhjh-HIcyzqrqDJ_TA")
+ADMIN_PASSWORD = st.secrets.get("ADMIN_PASSWORD", "admin2026")
 
 @st.cache_resource
 def get_driver():
-    return GraphDatabase.driver(NEO4J_URI, auth=NEO4J_AUTH)
+    return GraphDatabase.driver(NEO4J_URI, auth=(NEO4J_USER, NEO4J_PASSWORD))
 
 driver = get_driver()
 
-def get_known_symptoms():
-    query = "MATCH (s:Symptom) RETURN s.name AS symptom"
-    with driver.session() as session:
-        result = session.run(query)
-        return [r["symptom"] for r in result]
+st.set_page_config(page_title="電信通訊故障診斷專家系統", layout="wide")
+st.title("🛠️ 電信通訊故障診斷專家系統")
 
-def beam_search(symptom_name: str, beam_width: int = 2):
-    query = """
-    MATCH (s:Symptom {name: $symptom})-[cb:CAUSED_BY]->(rc:RootCause)-[:RESOLVED_BY]->(act:Action)
-    MATCH (rc)-[:LOCATED_IN]->(comp:Component)
-    OPTIONAL MATCH (act)-[:REQUIRES]->(tool:Tool)
-    RETURN 
-        rc.name AS 原因,
-        cb.prob AS 機率,
-        comp.location AS 位置,
-        act.name AS 維修步驟,
-        act.est_time_min AS 耗時_分鐘,
-        collect(tool.name) AS 所需工具
-    ORDER BY cb.prob DESC
-    LIMIT $k
-    """
-    with driver.session() as session:
-        result = session.run(query, symptom=symptom_name, k=beam_width)
-        return [record.data() for record in result]
-
-def generate_instruction(symptom: str, paths: list):
-    context_str = json.dumps(paths, ensure_ascii=False, indent=2)
-    prompt = f"""你是一名電話設備維修工程師。
-現場反映：「{symptom}」
-推論引擎推薦路徑：{context_str}
-
-請產生一份條理分明的維修指導（包含原因機率、地點步驟、工具與預估時間）："""
-
-    payload = {
-        "model": MODEL_NAME,
-        "prompt": prompt,
-        "stream": False,
-        "options": {"temperature": 0.0}
-    }
-    try:
-        res = requests.post(OLLAMA_URL, json=payload, timeout=60)
-        return res.json().get("response", "報告生成失敗")
-    except Exception as e:
-        return f"Ollama 連線異常: {e}"
-
-def submit_feedback(symptom: str, confirmed_cause: str):
-    cypher = """
-    MATCH (s:Symptom {name: $symptom})-[target:CAUSED_BY]->(rc:RootCause {name: $cause})
-    SET target.count = coalesce(target.count, 0) + 1
-
-    WITH s
-    MATCH (s)-[all_rel:CAUSED_BY]->(:RootCause)
-    WITH s, sum(all_rel.count) AS total_count, collect(all_rel) AS rel_list
-
-    UNWIND rel_list AS r
-    SET r.prob = round(toFloat(r.count) / toFloat(total_count), 4)
-
-    RETURN endNode(r).name AS 原因, r.count AS 次數, r.prob AS 新機率
-    ORDER BY r.prob DESC;
-    """
-    with driver.session() as session:
-        result = session.run(cypher, symptom=symptom, cause=confirmed_cause)
-        return [r.data() for r in result]
-
-st.title("📞 通訊設備智能維修專家系統 (Neuro-Symbolic Web App)")
-st.markdown("結合 **Neo4j 知識圖譜**、**馬可夫鏈狀態轉移** 與 **本機 Ollama (Qwen 2.5)** 的動態排障平台。")
-
-known_symptoms = get_known_symptoms()
-
+# ==========================================
+# 側邊欄：實時故障統計面板
+# ==========================================
 with st.sidebar:
-    st.header("⚙️ 系統狀態")
-    st.success("Neo4j 連線正常")
-    beam_k = st.slider("Beam Search 搜尋寬度 (K)", min_value=1, max_value=4, value=2)
+    st.header("📊 故障原因累積統計")
+    if st.button("🔄 重新整理統計數據"):
+        st.rerun()
 
-col1, col2 = st.columns([2, 1])
-with col1:
-    selected_symptom = st.selectbox("選擇標準故障現象：", known_symptoms)
-with col2:
-    st.write("")
-    st.write("")
-    diagnose_btn = st.button("🚀 開始智能診斷", type="primary")
+    stats_query = """
+    MATCH (s:Symptom)-[r:CAUSED_BY]->(rc:RootCause)
+    RETURN s.name AS 現象, rc.name AS 原因, coalesce(r.count, 0) AS 次數, round(coalesce(r.prob, 0.0) * 100, 1) AS `機率(%)`
+    ORDER BY 次數 DESC
+    """
+    try:
+        with driver.session() as session:
+            stats_result = session.run(stats_query)
+            data = [row.data() for row in stats_result]
+            if data:
+                st.dataframe(data, hide_index=True)
+            else:
+                st.info("尚無統計數據。")
+    except Exception as e:
+        st.error(f"資料庫連線失敗: {e}")
 
-if diagnose_btn:
-    with st.spinner("知識圖譜 Beam Search 剪枝推論中..."):
-        paths = beam_search(selected_symptom, beam_width=beam_k)
-        st.session_state["diagnosis_paths"] = paths
-        st.session_state["current_symptom"] = selected_symptom
-    
-    with st.spinner("Ollama 正在編寫排障手冊..."):
-        report = generate_instruction(selected_symptom, paths)
-        st.session_state["diagnosis_report"] = report
+# ==========================================
+# 主畫面：雙分頁架構
+# ==========================================
+tab_user, tab_admin = st.tabs(["🔧 現場診斷與反饋", "🛡️ 管理員審核後台"])
 
-if "diagnosis_paths" in st.session_state:
-    st.markdown("---")
-    res_col1, res_col2 = st.columns([1, 1])
+# ──────────────────────────────────────────
+# 分頁 1: 現場診斷與回報
+# ──────────────────────────────────────────
+with tab_user:
+    st.subheader("現場故障診斷")
 
-    with res_col1:
-        st.subheader("📊 馬可夫推論路徑 (Top-K)")
-        for idx, item in enumerate(st.session_state["diagnosis_paths"], 1):
-            with st.expander(f"優先序 #{idx}: {item['原因']} (機率: {item['機率'] * 100:.1f}%)", expanded=True):
-                st.write(f"📍 **維修位置**：{item['位置']}")
-                st.write(f"⏱️️ **預估耗時**：{item['耗時_分鐘']} 分鐘")
-                st.write(f"🔧 **所需工具**：{', '.join(item['所需工具']) if item['所需工具'] else '一般工具'}")
-                st.write(f"📝 **處置工序**：{item['維修步驟']}")
+    symptom_list = []
+    try:
+        with driver.session() as session:
+            s_res = session.run("MATCH (s:Symptom) RETURN s.name AS name")
+            symptom_list = [r["name"] for r in s_res]
+    except Exception:
+        symptom_list = ["拿起聽筒完全無撥號音(無聲)", "通話雜音或串音"]
 
-    with res_col2:
-        st.subheader("🤖 Ollama 繁中維修指導書")
-        st.info(st.session_state["diagnosis_report"])
+    selected_symptom = st.selectbox("選擇標準故障現象", symptom_list)
+    beam_k = st.slider("Beam Search 搜尋路徑數 (Top-K)", min_value=1, max_value=3, value=2)
 
-    st.markdown("---")
-    st.subheader("🛠️ 現場維修反饋 (即時更新馬可夫機率)")
+    if st.button("🚀 開始智能診斷"):
+        with st.spinner("知識圖譜推論中..."):
+            query = """
+            MATCH (s:Symptom {name: $symptom})-[cb:CAUSED_BY]->(rc:RootCause)-[:RESOLVED_BY]->(act:Action)
+            MATCH (rc)-[:LOCATED_IN]->(comp:Component)
+            OPTIONAL MATCH (act)-[:REQUIRES]->(tool:Tool)
+            RETURN
+                rc.name AS 原因,
+                cb.prob AS 機率,
+                comp.location AS 位置,
+                act.name AS 維修步驟,
+                act.est_time_min AS 耗時_分鐘,
+                collect(tool.name) AS 所需工具
+            ORDER BY cb.prob DESC
+            LIMIT $k
+            """
+            with driver.session() as session:
+                paths = [r.data() for r in session.run(query, symptom=selected_symptom, k=beam_k)]
 
-    base_causes = [p["原因"] for p in st.session_state["diagnosis_paths"]]
-    feedback_options = base_causes + ["以上皆非（提報現場新處置方案）"]
+            st.session_state["current_paths"] = paths
+            st.session_state["symptom"] = selected_symptom
 
-    selected_cause = st.radio(
-        "請確認最終修復該故障的實際原因：",
-        feedback_options,
-        index=0
-    )
+        if paths:
+            st.success(f"🎯 圖推論完成！推薦前 {len(paths)} 項最優先排查方案：")
+            for idx, p in enumerate(paths, 1):
+                prob_pct = round(p['機率'] * 100, 1)
+                tools_str = ', '.join(p['所需工具']) if p['所需工具'] else '通用檢修工具'
+                
+                with st.container():
+                    st.markdown(f"#### 優先序 #{idx}：【{p['原因']}】 (先驗機率: `{prob_pct}%`)")
+                    c1, c2, c3 = st.columns(3)
+                    c1.metric("📍 檢查位置", p['位置'])
+                    c2.metric("⏱️ 預估耗時", f"{p['耗時_分鐘']} 分鐘")
+                    c3.metric("🔧 必備工具", tools_str)
+                    st.info(f"👉 **建議處置作為**：{p['維修步驟']}")
+                    st.markdown("---")
 
-    if selected_cause in base_causes:
-        if st.button("✅ 確認回報並更新機率", type="primary"):
-            updated_data = submit_feedback(st.session_state["current_symptom"], selected_cause)
-            st.success(f"反饋成功！已將『{selected_cause}』累加工單計數，並自動重新正規化轉移機率。")
-            st.dataframe(updated_data)
-    else:
-        st.info("💡 偵測到新故障情境！請記錄現場實際處置措施，系統將暫存入審核池，審核通過後即納入知識庫。")
-        with st.form("custom_feedback_form"):
-            col_c, col_a = st.columns(2)
-            with col_c:
-                new_cause = st.text_input("實際故障根本原因 (例: 電話機變壓器燒毀)")
-            with col_a:
-                new_action = st.text_input("實際採取的處置措施 (例: 更換專用電源適配器)")
-            
-            submit_new = st.form_submit_button("📩 提交新維修方案至暫存庫")
-            
-            if submit_new:
-                if not new_cause.strip():
-                    st.warning("請填寫實際故障根本原因！")
-                else:
-                    cypher_staging = """
+    # 現場回報區
+    if "current_paths" in st.session_state and st.session_state["current_paths"]:
+        st.subheader("🛠️ 現場維修結果反饋")
+        options = [p["原因"] for p in st.session_state["current_paths"]] + ["以上皆非（提報現場新處置方案）"]
+        chosen = st.radio("請勾選實際解決問題的原因：", options)
+
+        if chosen == "以上皆非（提報現場新處置方案）":
+            new_cause = st.text_input("輸入實際發現的故障原因")
+            new_action = st.text_input("輸入採取的具體處置對策")
+            if st.button("📩 提交至審核暫存庫"):
+                if new_cause and new_action:
+                    c_query = """
                     MATCH (s:Symptom {name: $symptom})
                     CREATE (fb:PendingFeedback {
                         symptom: $symptom,
@@ -168,11 +121,78 @@ if "diagnosis_paths" in st.session_state:
                     })
                     CREATE (s)-[:HAS_PENDING_FEEDBACK]->(fb)
                     """
-                    with driver.session() as session:
-                        session.run(
-                            cypher_staging, 
-                            symptom=st.session_state["current_symptom"],
-                            cause=new_cause.strip(),
-                            action=new_action.strip() if new_action.strip() else "一般線路檢修"
-                        )
-                    st.success("🎉 已成功將新排障知識提報至暫存審核池！管理員審核後將正式連線至知識圖譜。")
+                    with driver.session() as s:
+                        s.run(c_query, symptom=st.session_state["symptom"], cause=new_cause, action=new_action)
+                    st.success("已送出新方案至待審核暫存庫！")
+                else:
+                    st.warning("請填寫完整原因與處置對策。")
+        else:
+            if st.button("✅ 確認回報並更新機率"):
+                u_query = """
+                MATCH (s:Symptom {name: $symptom})-[target:CAUSED_BY]->(rc:RootCause {name:$cause})
+                SET target.count = coalesce(target.count, 0) + 1
+                WITH s
+                MATCH (s)-[all_rel:CAUSED_BY]->(:RootCause)
+                WITH s, sum(all_rel.count) AS total, collect(all_rel) AS list
+                UNWIND list AS r
+                SET r.prob = round((toFloat(r.count) / toFloat(total)) * 10000.0) / 10000.0
+                """
+                with driver.session() as s:
+                    s.run(u_query, symptom=st.session_state["symptom"], cause=chosen)
+                st.success(f"已記錄！原因「{chosen}」次數增加，機率已重新平衡計算。")
+
+# ──────────────────────────────────────────
+# 分頁 2: 管理員審核後台
+# ──────────────────────────────────────────
+with tab_admin:
+    st.subheader("🛡️ 待審核現場回報 (PendingFeedback)")
+    admin_pwd = st.text_input("請輸入管理員密碼", type="password")
+
+    if admin_pwd == ADMIN_PASSWORD:
+        st.success("管理員身分已驗證。")
+        p_query = """
+        MATCH (s:Symptom)-[:HAS_PENDING_FEEDBACK]->(fb:PendingFeedback {status: 'PENDING_REVIEW'})
+        RETURN id(fb) AS id, s.name AS symptom, fb.custom_cause AS cause, fb.custom_action AS action, toString(fb.created_at) AS created_at
+        """
+        with driver.session() as s:
+            pending_list = [r.data() for r in s.run(p_query)]
+
+        if not pending_list:
+            st.info("目前暫存庫中無待審核項目。")
+        else:
+            for item in pending_list:
+                col_info, col_ok, col_no = st.columns([4, 1, 1])
+                with col_info:
+                    st.write(f"📌 **現象**：{item['symptom']}")
+                    st.write(f"💡 **新原因**：`{item['cause']}` ｜ **對策**：`{item['action']}`")
+                    st.caption(f"時間：{item['created_at']}")
+                with col_ok:
+                    if st.button("✅ 核准入庫", key=f"app_{item['id']}"):
+                        approve_cypher = """
+                        MATCH (s:Symptom)-[:HAS_PENDING_FEEDBACK]->(fb:PendingFeedback) WHERE id(fb) = $fid
+                        SET fb.status = 'APPROVED'
+                        MERGE (rc:RootCause {name: fb.custom_cause})
+                        MERGE (act:Action {name: fb.custom_action})
+                        MERGE (rc)-[:RESOLVED_BY]->(act)
+                        MERGE (s)-[r:CAUSED_BY]->(rc)
+                        ON CREATE SET r.count = 1
+                        ON MATCH SET r.count = coalesce(r.count, 0) + 1
+                        WITH s
+                        MATCH (s)-[all_rel:CAUSED_BY]->(:RootCause)
+                        WITH s, sum(all_rel.count) AS total, collect(all_rel) AS list
+                        UNWIND list AS r
+                        SET r.prob = round((toFloat(r.count) / toFloat(total)) * 10000.0) / 10000.0
+                        """
+                        with driver.session() as s:
+                            s.run(approve_cypher, fid=item['id'])
+                        st.success("已核准！正式建立節點並重平衡機率。")
+                        st.rerun()
+                with col_no:
+                    if st.button("❌ 駁回", key=f"rej_{item['id']}"):
+                        with driver.session() as s:
+                            s.run("MATCH (fb:PendingFeedback) WHERE id(fb) = $fid SET fb.status = 'REJECTED'", fid=item['id'])
+                        st.warning("已駁回。")
+                        st.rerun()
+                st.markdown("---")
+    elif admin_pwd != "":
+        st.error("密碼錯誤，拒絕存取。")

@@ -58,7 +58,7 @@ with tab_user:
             dt_res = session.run("MATCH (d:DeviceType) RETURN d.name AS name ORDER BY d.name")
             device_types = [r["name"] for r in dt_res]
     except Exception:
-        device_types = ["類比話機 (傳統單機/POTS)", "數位/總機專用話機 (Keyphone/KTS)"]
+        device_types = ["類比話機 (傳統單機/POTS)", "AVAYA 數位/IP 專用話機 (1400/9600 系列)"]
 
     c1, c2, c3 = st.columns(3)
     

@@ -3,7 +3,7 @@ from neo4j import GraphDatabase
 
 # 1. 系統連線設定 (優先讀取 Secrets，若無則使用 AuraDB 預設參數)
 NEO4J_URI = st.secrets.get("NEO4J_URI", "neo4j+ssc://b8cec18b.databases.neo4j.io")
-NEO4J_USER = st.secrets.get("NEO4J_USER", "neo4j")
+NEO4J_USER = st.secrets.get("NEO4J_USER", "b8cec18b")
 NEO4J_PASSWORD = st.secrets.get("NEO4J_PASSWORD", "P9wY81fDEc8bT67wCIq6Z329QOhjh-HIcyzqrqDJ_TA")
 ADMIN_PASSWORD = st.secrets.get("ADMIN_PASSWORD", "admin2026")
 
@@ -25,8 +25,8 @@ with st.sidebar:
         st.rerun()
 
     stats_query = """
-    MATCH (d:DeviceType)-[:HAS_SYMPTOM]->(s:Symptom)-[r:CAUSED_BY]->(rc:RootCause)
-    RETURN d.name AS 設備類型, s.name AS 現象, rc.name AS 原因, coalesce(r.count, 0) AS 次數, round(coalesce(r.prob, 0.0) * 100, 1) AS `機率(%)`
+    MATCH (d:DeviceType)-[:HAS_AUDIO_STATE]->(ss:SoundStatus)-[:HAS_SYMPTOM]->(s:Symptom)-[r:CAUSED_BY]->(rc:RootCause)
+    RETURN d.name AS 設備類型, ss.name AS 聲響狀態, rc.name AS 原因, coalesce(r.count, 0) AS 次數, round(coalesce(r.prob, 0.0) * 100, 1) AS `機率(%)`
     ORDER BY 設備類型, 次數 DESC
     """
     try:
@@ -46,12 +46,12 @@ with st.sidebar:
 tab_user, tab_admin = st.tabs(["🔧 現場診斷與回報 (一般技師)", "🛡️ 管理員專用後台 (需驗證)"])
 
 # ──────────────────────────────────────────
-# 分頁 1: 現場診斷與回報
+# 分頁 1: 現場診斷與回報 (三階選單)
 # ──────────────────────────────────────────
 with tab_user:
     st.subheader("現場故障診斷")
 
-    # 1. 取得設備類型清單
+    # 1. 取得設備類型 (第一層)
     device_types = []
     try:
         with driver.session() as session:
@@ -60,40 +60,60 @@ with tab_user:
     except Exception:
         device_types = ["類比話機 (傳統單機/POTS)", "數位/總機專用話機 (Keyphone/KTS)"]
 
-    col_dev, col_sym = st.columns([1, 2])
-    with col_dev:
-        selected_device = st.radio("第一步：選擇話機架構類型", device_types)
+    c1, c2, c3 = st.columns(3)
+    
+    with c1:
+        selected_device = st.radio("【層級 1】話機設備類型", device_types)
 
-    # 2. 依設備類型連動取得對應 Symptom
+    # 2. 依設備類型連動取得聲響狀態 (第二層)
+    sound_status_list = []
+    try:
+        with driver.session() as session:
+            ss_res = session.run(
+                """
+                MATCH (d:DeviceType {name: $device})-[:HAS_AUDIO_STATE]->(ss:SoundStatus)
+                RETURN ss.name AS name ORDER BY ss.name
+                """,
+                device=selected_device
+            )
+            sound_status_list = [r["name"] for r in ss_res]
+    except Exception:
+        sound_status_list = []
+
+    with c2:
+        selected_sound = st.radio("【層級 2】聲響基本狀態", sound_status_list if sound_status_list else ["無狀態"])
+
+    # 3. 依聲響狀態連動取得具體故障現象 (第三層)
     symptom_list = []
     try:
         with driver.session() as session:
             s_res = session.run(
                 """
-                MATCH (d:DeviceType {name: $device})-[:HAS_SYMPTOM]->(s:Symptom)
+                MATCH (d:DeviceType {name: $device})-[:HAS_AUDIO_STATE]->(ss:SoundStatus {name:$sound})-[:HAS_SYMPTOM]->(s:Symptom)
                 RETURN s.name AS name ORDER BY s.name
                 """,
-                device=selected_device
+                device=selected_device,
+                sound=selected_sound
             )
             symptom_list = [r["name"] for r in s_res]
     except Exception:
         symptom_list = []
 
-    with col_sym:
+    with c3:
         if symptom_list:
-            selected_symptom = st.selectbox("第二步：選擇標準故障現象", symptom_list)
+            selected_symptom = st.selectbox("【層級 3】具體故障現象細項", symptom_list)
         else:
-            selected_symptom = st.selectbox("第二步：選擇標準故障現象", ["(該設備目前無登錄現象)"])
+            selected_symptom = st.selectbox("【層級 3】具體故障現象細項", ["(查無對應現象)"])
 
     beam_k = st.slider("Beam Search 搜尋路徑數 (Top-K)", min_value=1, max_value=3, value=2)
 
     if st.button("🚀 開始智能診斷"):
-        if not selected_symptom or "(該設備" in selected_symptom:
-            st.warning("請先選擇有效的故障現象！")
+        if not selected_symptom or "(查無" in selected_symptom:
+            st.warning("請先選擇有效的具體故障現象！")
         else:
             with st.spinner("知識圖譜推論中..."):
                 query = """
-                MATCH (d:DeviceType {name: $device})-[:HAS_SYMPTOM]->(s:Symptom {name:$symptom})-[cb:CAUSED_BY]->(rc:RootCause)-[:RESOLVED_BY]->(act:Action)
+                MATCH (d:DeviceType {name: $device})-[:HAS_AUDIO_STATE]->(ss:SoundStatus {name: $sound})-[:HAS_SYMPTOM]->(s:Symptom {name:$symptom})-[cb:CAUSED_BY]->(rc:RootCause)-[:RESOLVED_BY]->(act:Action)
                 MATCH (rc)-[:LOCATED_IN]->(comp:Component)
                 OPTIONAL MATCH (act)-[:REQUIRES]->(tool:Tool)
                 RETURN
@@ -107,24 +127,27 @@ with tab_user:
                 LIMIT $k
                 """
                 with driver.session() as session:
-                    paths = [r.data() for r in session.run(query, device=selected_device, symptom=selected_symptom, k=beam_k)]
+                    paths = [r.data() for r in session.run(
+                        query, device=selected_device, sound=selected_sound, symptom=selected_symptom, k=beam_k
+                    )]
 
                 st.session_state["current_paths"] = paths
                 st.session_state["symptom"] = selected_symptom
                 st.session_state["device"] = selected_device
+                st.session_state["sound"] = selected_sound
 
             if paths:
-                st.success(f"🎯 針對【{selected_device}】推論完成！推薦前 {len(paths)} 項最優先排查方案：")
+                st.success(f"🎯 針對【{selected_device} ➔ {selected_sound}】推論完成！推薦前 {len(paths)} 項最優先排查方案：")
                 for idx, p in enumerate(paths, 1):
                     prob_pct = round(p['機率'] * 100, 1)
                     tools_str = ', '.join(p['所需工具']) if p['所需工具'] else '通用檢修工具'
                     
                     with st.container():
                         st.markdown(f"#### 優先序 #{idx}：【{p['原因']}】 (先驗機率: `{prob_pct}%`)")
-                        c1, c2, c3 = st.columns(3)
-                        c1.metric("📍 檢查位置", p['位置'])
-                        c2.metric("⏱️ 預估耗時", f"{p['耗時_分鐘']} 分鐘")
-                        c3.metric("🔧 必備工具", tools_str)
+                        col_m1, col_m2, col_m3 = st.columns(3)
+                        col_m1.metric("📍 檢查位置", p['位置'])
+                        col_m2.metric("⏱️ 預估耗時", f"{p['耗時_分鐘']} 分鐘")
+                        col_m3.metric("🔧 必備工具", tools_str)
                         st.info(f"👉 **建議處置作為**：{p['維修步驟']}")
                         st.markdown("---")
             else:
@@ -142,9 +165,10 @@ with tab_user:
             if st.button("📩 提交至審核暫存庫"):
                 if new_cause and new_action:
                     c_query = """
-                    MATCH (d:DeviceType {name: $device})-[:HAS_SYMPTOM]->(s:Symptom {name:$symptom})
+                    MATCH (s:Symptom {name: $symptom})
                     CREATE (fb:PendingFeedback {
                         device: $device,
+                        sound: $sound,
                         symptom: $symptom,
                         custom_cause: $cause,
                         custom_action: $action,
@@ -154,7 +178,7 @@ with tab_user:
                     CREATE (s)-[:HAS_PENDING_FEEDBACK]->(fb)
                     """
                     with driver.session() as s:
-                        s.run(c_query, device=st.session_state["device"], symptom=st.session_state["symptom"], cause=new_cause, action=new_action)
+                        s.run(c_query, device=st.session_state["device"], sound=st.session_state["sound"], symptom=st.session_state["symptom"], cause=new_cause, action=new_action)
                     st.success("已送出新方案至待審核暫存庫，請等待管理員核准！")
                 else:
                     st.warning("請填寫完整原因與處置對策。")
@@ -192,22 +216,22 @@ with tab_admin:
             st.markdown("### 🛠️ 編輯現有維修處置 (Action)")
 
             act_query = """
-            MATCH (d:DeviceType)-[:HAS_SYMPTOM]->(s:Symptom)-[:CAUSED_BY]->(rc:RootCause)-[:RESOLVED_BY]->(act:Action)
+            MATCH (d:DeviceType)-[:HAS_AUDIO_STATE]->(ss:SoundStatus)-[:HAS_SYMPTOM]->(s:Symptom)-[:CAUSED_BY]->(rc:RootCause)-[:RESOLVED_BY]->(act:Action)
             OPTIONAL MATCH (act)-[:REQUIRES]->(t:Tool)
-            RETURN act.name AS action_name, act.est_time_min AS time_min, rc.name AS root_cause, d.name AS device, collect(t.name) AS tools
+            RETURN act.name AS action_name, act.est_time_min AS time_min, rc.name AS root_cause, d.name AS device, ss.name AS sound, collect(t.name) AS tools
             ORDER BY d.name, act.name
             """
             with driver.session() as s:
                 actions_data = [r.data() for r in s.run(act_query)]
 
             if actions_data:
-                action_display = [f"[{item['device']}] {item['action_name']}" for item in actions_data]
+                action_display = [f"[{item['device']} | {item['sound']}] {item['action_name']}" for item in actions_data]
                 selected_display = st.selectbox("選擇要編輯的維修方法：", action_display)
 
                 idx = action_display.index(selected_display)
                 current_act = actions_data[idx]
 
-                st.markdown(f"**適用設備**：`{current_act['device']}`")
+                st.markdown(f"**設備與狀態**：`{current_act['device']}` ➔ `{current_act['sound']}`")
                 st.markdown(f"**關聯故障原因**：`{current_act['root_cause']}`")
 
                 with st.form("edit_action_form"):
@@ -246,7 +270,7 @@ with tab_admin:
             st.markdown("### 📥 審核技師提交的全新處置方案")
             p_query = """
             MATCH (s:Symptom)-[:HAS_PENDING_FEEDBACK]->(fb:PendingFeedback {status: 'PENDING_REVIEW'})
-            RETURN id(fb) AS id, coalesce(fb.device, '未指定') AS device, s.name AS symptom, fb.custom_cause AS cause, fb.custom_action AS action, toString(fb.created_at) AS created_at
+            RETURN id(fb) AS id, coalesce(fb.device, '未指定') AS device, coalesce(fb.sound, '未指定') AS sound, s.name AS symptom, fb.custom_cause AS cause, fb.custom_action AS action, toString(fb.created_at) AS created_at
             """
             with driver.session() as s:
                 pending_list = [r.data() for r in s.run(p_query)]
@@ -257,7 +281,8 @@ with tab_admin:
                 for item in pending_list:
                     col_info, col_ok, col_no = st.columns([4, 1, 1])
                     with col_info:
-                        st.write(f"📱 **設備類型**：`{item['device']}` ｜ 📌 **現象**：{item['symptom']}")
+                        st.write(f"📱 **設備**：`{item['device']}` ｜ 🔊 **聲響**：`{item['sound']}`")
+                        st.write(f"📌 **現象**：{item['symptom']}")
                         st.write(f"💡 **新原因**：`{item['cause']}` ｜ **對策**：`{item['action']}`")
                         st.caption(f"時間：{item['created_at']}")
                     with col_ok:

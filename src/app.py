@@ -1,10 +1,11 @@
 ﻿import streamlit as st
 from neo4j import GraphDatabase
 
-# 1. 系統連線設定 (優先讀取 Secrets，若無則使用預設 AuraDB 連線)
+# 1. 系統連線設定 (優先讀取 Secrets，若無則使用 AuraDB 預設參數)
 NEO4J_URI = st.secrets.get("NEO4J_URI", "neo4j+ssc://b8cec18b.databases.neo4j.io")
-NEO4J_USER = st.secrets.get("NEO4J_USER", "b8cec18b")
+NEO4J_USER = st.secrets.get("NEO4J_USER", "neo4j")
 NEO4J_PASSWORD = st.secrets.get("NEO4J_PASSWORD", "P9wY81fDEc8bT67wCIq6Z329QOhjh-HIcyzqrqDJ_TA")
+# 管理員驗證密碼（可於 Streamlit Secrets 自訂）
 ADMIN_PASSWORD = st.secrets.get("ADMIN_PASSWORD", "admin2026")
 
 @st.cache_resource
@@ -43,10 +44,10 @@ with st.sidebar:
 # ==========================================
 # 主畫面：雙分頁架構
 # ==========================================
-tab_user, tab_admin = st.tabs(["🔧 現場診斷與反饋", "🛡️ 管理員審核後台"])
+tab_user, tab_admin = st.tabs(["🔧 現場診斷與回報 (一般技師)", "🛡️ 管理員專用後台 (需驗證)"])
 
 # ──────────────────────────────────────────
-# 分頁 1: 現場診斷與回報
+# 分頁 1: 現場診斷與回報 (唯讀推論 + 提交待審)
 # ──────────────────────────────────────────
 with tab_user:
     st.subheader("現場故障診斷")
@@ -99,7 +100,7 @@ with tab_user:
                     st.info(f"👉 **建議處置作為**：{p['維修步驟']}")
                     st.markdown("---")
 
-    # 現場回報區
+    # 現場回報區 (一般技師只能提出反饋或投票機率，無法直接修改本體)
     if "current_paths" in st.session_state and st.session_state["current_paths"]:
         st.subheader("🛠️ 現場維修結果反饋")
         options = [p["原因"] for p in st.session_state["current_paths"]] + ["以上皆非（提報現場新處置方案）"]
@@ -123,7 +124,7 @@ with tab_user:
                     """
                     with driver.session() as s:
                         s.run(c_query, symptom=st.session_state["symptom"], cause=new_cause, action=new_action)
-                    st.success("已送出新方案至待審核暫存庫！")
+                    st.success("已送出新方案至待審核暫存庫，請等待管理員核准！")
                 else:
                     st.warning("請填寫完整原因與處置對策。")
         else:
@@ -139,59 +140,128 @@ with tab_user:
                 """
                 with driver.session() as s:
                     s.run(u_query, symptom=st.session_state["symptom"], cause=chosen)
-                st.success(f"已記錄！原因「{chosen}」次數增加，機率已重新平衡計算。")
+                st.success(f"已記錄！原因「{chosen}」次數增加，機率已重新動態平衡。")
 
 # ──────────────────────────────────────────
-# 分頁 2: 管理員審核後台
+# 分頁 2: 管理員專屬後台 (需驗證權限)
 # ──────────────────────────────────────────
 with tab_admin:
-    st.subheader("🛡️ 待審核現場回報 (PendingFeedback)")
-    admin_pwd = st.text_input("請輸入管理員密碼", type="password")
+    st.subheader("🛡️ 管理員權限驗證")
+    admin_pwd = st.text_input("請輸入管理員密碼以解鎖維修資料庫編輯權限", type="password")
 
     if admin_pwd == ADMIN_PASSWORD:
-        st.success("管理員身分已驗證。")
-        p_query = """
-        MATCH (s:Symptom)-[:HAS_PENDING_FEEDBACK]->(fb:PendingFeedback {status: 'PENDING_REVIEW'})
-        RETURN id(fb) AS id, s.name AS symptom, fb.custom_cause AS cause, fb.custom_action AS action, toString(fb.created_at) AS created_at
-        """
-        with driver.session() as s:
-            pending_list = [r.data() for r in s.run(p_query)]
+        st.success("🔓 管理員身分已驗證，已解鎖資料庫管理權限。")
+        
+        adm_subtab1, adm_subtab2 = st.tabs(["📝 維修處置 (Action) 編輯管理", "📥 待審核技師回報 (PendingFeedback)"])
 
-        if not pending_list:
-            st.info("目前暫存庫中無待審核項目。")
-        else:
-            for item in pending_list:
-                col_info, col_ok, col_no = st.columns([4, 1, 1])
-                with col_info:
-                    st.write(f"📌 **現象**：{item['symptom']}")
-                    st.write(f"💡 **新原因**：`{item['cause']}` ｜ **對策**：`{item['action']}`")
-                    st.caption(f"時間：{item['created_at']}")
-                with col_ok:
-                    if st.button("✅ 核准入庫", key=f"app_{item['id']}"):
-                        approve_cypher = """
-                        MATCH (s:Symptom)-[:HAS_PENDING_FEEDBACK]->(fb:PendingFeedback) WHERE id(fb) = $fid
-                        SET fb.status = 'APPROVED'
-                        MERGE (rc:RootCause {name: fb.custom_cause})
-                        MERGE (act:Action {name: fb.custom_action})
-                        MERGE (rc)-[:RESOLVED_BY]->(act)
-                        MERGE (s)-[r:CAUSED_BY]->(rc)
-                        ON CREATE SET r.count = 1
-                        ON MATCH SET r.count = coalesce(r.count, 0) + 1
-                        WITH s
-                        MATCH (s)-[all_rel:CAUSED_BY]->(:RootCause)
-                        WITH s, sum(all_rel.count) AS total, collect(all_rel) AS list
-                        UNWIND list AS r
-                        SET r.prob = round((toFloat(r.count) / toFloat(total)) * 10000.0) / 10000.0
-                        """
-                        with driver.session() as s:
-                            s.run(approve_cypher, fid=item['id'])
-                        st.success("已核准！正式建立節點並重平衡機率。")
-                        st.rerun()
-                with col_no:
-                    if st.button("❌ 駁回", key=f"rej_{item['id']}"):
-                        with driver.session() as s:
-                            s.run("MATCH (fb:PendingFeedback) WHERE id(fb) = $fid SET fb.status = 'REJECTED'", fid=item['id'])
-                        st.warning("已駁回。")
+        # ----------------------------------------------------
+        # 子功能 1: 視覺化維修方法編輯管理 (管理員專屬)
+        # ----------------------------------------------------
+        with adm_subtab1:
+            st.markdown("### 🛠️ 編輯現有維修處置 (Action)")
+
+            # 抓取目前圖譜中的所有 Action 與關聯資訊
+            act_query = """
+            MATCH (rc:RootCause)-[:RESOLVED_BY]->(act:Action)
+            OPTIONAL MATCH (act)-[:REQUIRES]->(t:Tool)
+            RETURN act.name AS action_name, act.est_time_min AS time_min, rc.name AS root_cause, collect(t.name) AS tools
+            ORDER BY act.name
+            """
+            with driver.session() as s:
+                actions_data = [r.data() for r in s.run(act_query)]
+
+            if actions_data:
+                action_options = [item["action_name"] for item in actions_data]
+                selected_action_name = st.selectbox("選擇要編輯的維修方法：", action_options)
+
+                current_act = next(item for item in actions_data if item["action_name"] == selected_action_name)
+
+                st.markdown(f"**關聯的故障原因**：`{current_act['root_cause']}`")
+                st.markdown(f"**目前配置的工具**：`{', '.join(current_act['tools']) if current_act['tools'] else '無指定'}`")
+
+                with st.form("edit_action_form"):
+                    new_action_text = st.text_input("維修處置名稱 / 步驟說明", value=current_act["action_name"])
+                    new_time = st.number_input("預估處理耗時 (分鐘)", min_value=1, max_value=240, value=int(current_act["time_min"] if current_act["time_min"] else 15))
+                    new_tools_input = st.text_input("所需工具 (多項請用逗號分隔)", value=", ".join(current_act["tools"]))
+
+                    save_btn = st.form_submit_button("💾 儲存並更新資料庫")
+
+                if save_btn:
+                    tools_list = [t.strip() for t in new_tools_input.split(",") if t.strip()]
+                    
+                    update_cypher = """
+                    MATCH (a:Action {name: $old_name})
+                    SET a.name = $new_name,
+                        a.est_time_min = $new_time
+                    WITH a
+                    OPTIONAL MATCH (a)-[r:REQUIRES]->(:Tool)
+                    DELETE r
+                    WITH a
+                    UNWIND $tools AS t_name
+                    MERGE (t:Tool {name: t_name})
+                    MERGE (a)-[:REQUIRES]->(t)
+                    """
+                    with driver.session() as s:
+                        s.run(update_cypher, old_name=selected_action_name, new_name=new_action_text, new_time=new_time, tools=tools_list)
+                    st.success(f"✅ 維修處置「{new_action_text}」與相關工具已成功更新！")
+                    st.rerun()
+            else:
+                st.info("目前資料庫中尚無維修處置資料。")
+
+        # ----------------------------------------------------
+        # 子功能 2: 待審核回報審核
+        # ----------------------------------------------------
+        with adm_subtab2:
+            st.markdown("### 📥 審核技師提交的全新處置方案")
+            p_query = """
+            MATCH (s:Symptom)-[:HAS_PENDING_FEEDBACK]->(fb:PendingFeedback {status: 'PENDING_REVIEW'})
+            RETURN id(fb) AS id, s.name AS symptom, fb.custom_cause AS cause, fb.custom_action AS action, toString(fb.created_at) AS created_at
+            """
+            with driver.session() as s:
+                pending_list = [r.data() for r in s.run(p_query)]
+
+            if not pending_list:
+                st.info("目前暫存庫中無待審核項目。")
+            else:
+                for item in pending_list:
+                    col_info, col_ok, col_no = st.columns([4, 1, 1])
+                    with col_info:
+                        st.write(f"📌 **現象**：{item['symptom']}")
+                        st.write(f"💡 **新原因**：`{item['cause']}` ｜ **對策**：`{item['action']}`")
+                        st.caption(f"時間：{item['created_at']}")
+                    with col_ok:
+                        if st.button("✅ 核准入庫", key=f"app_{item['id']}"):
+                            approve_cypher = """
+                            MATCH (s:Symptom)-[:HAS_PENDING_FEEDBACK]->(fb:PendingFeedback) WHERE id(fb) = $fid
+                            SET fb.status = 'APPROVED'
+                            MERGE (rc:RootCause {name: fb.custom_cause})
+                            MERGE (act:Action {name: fb.custom_action, est_time_min: 20})
+                            MERGE (rc)-[:RESOLVED_BY]->(act)
+                            MERGE (s)-[r:CAUSED_BY]->(rc)
+                            ON CREATE SET r.count = 1
+                            ON MATCH SET r.count = coalesce(r.count, 0) + 1
+                            WITH s
+                            MATCH (s)-[all_rel:CAUSED_BY]->(:RootCause)
+                            WITH s, sum(all_rel.count) AS total, collect(all_rel) AS list
+                            UNWIND list AS r
+                            SET r.prob = round((toFloat(r.count) / toFloat(total)) * 10000.0) / 10000.0
+                            """
+                            with driver.session() as s:
+                                s.run(approve_cypher, fid=item['id'])
+                            st.success("已核准！正式建立節點並重平衡機率。")
+                            st.rerun()
+                    with col_no:
+                        if st.button("❌ 駁回", key=f"rej_{item['id']}"):
+                            with driver.session() as s:
+                                s.run("MATCH (fb:PendingFeedback) WHERE id(fb) = $fid SET fb.status = 'REJECTED'", fid=item['id'])
+                            st.warning("已駁回。")
+                            st.rerun()
+                    st.markdown("---")
+
+    elif admin_pwd != "":
+        st.error("❌ 密碼錯誤，拒絕存取維修管理功能。")
+    else:
+        st.info("🔒 此功能需要管理員權限，請先於上方輸入密碼。")
                         st.rerun()
                 st.markdown("---")
     elif admin_pwd != "":

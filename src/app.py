@@ -391,6 +391,7 @@ with tab_admin:
             MATCH (mo:MaintenanceOrder)
             OPTIONAL MATCH (tech:Technician)-[:HANDLED]->(mo)
             OPTIONAL MATCH (mo)-[:USED_TOOL]->(t:Tool)
+            WITH mo, tech, collect(DISTINCT t.name) AS tools
             RETURN 
                 elementId(mo) AS order_id,
                 coalesce(mo.repair_date, '未填') AS 施工日期,
@@ -399,7 +400,7 @@ with tab_admin:
                 coalesce(mo.actual_cause, '未知原因') AS 實際真因,
                 CASE WHEN mo.is_top1_hit = 1 THEN '🎯 Top-1 命中' ELSE '⚪ Top-K/非首位' END AS 命中狀態,
                 coalesce(mo.is_top1_hit, 0) AS hit_code,
-                collect(DISTINCT t.name) AS 使用工具,
+                tools AS 使用工具,
                 toString(mo.created_at) AS 系統登記時間
             ORDER BY mo.created_at DESC
             """

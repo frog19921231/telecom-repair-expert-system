@@ -1,3 +1,4 @@
+import datetime
 import streamlit as st
 from neo4j import GraphDatabase
 
@@ -46,14 +47,16 @@ with st.sidebar:
 tab_user, tab_admin = st.tabs(["🔧 現場診斷與回報 (一般技師)", "🛡️ 管理員專用後台 (需驗證)"])
 
 # ──────────────────────────────────────────
-# 分頁 1: 現場診斷與回報 (步驟 1 前置人員與日期)
+# 分頁 1: 現場診斷與回報 (分步導引式精靈)
 # ──────────────────────────────────────────
 with tab_user:
-    # 1. 初始化步驟狀態與共用變數
+    # 1. 初始化步驟狀態與共用變數 (包含日期防呆)
     if "step" not in st.session_state:
         st.session_state["step"] = 1
     if "saved_tech" not in st.session_state:
         st.session_state["saved_tech"] = ""
+    if "repair_date" not in st.session_state:
+        st.session_state["repair_date"] = datetime.date.today()
 
     # 頂部顯示當前排查進度條
     steps_label = ["1. 登錄人員與選取現象", "2. 智能診斷與排查指引", "3. 完工確認與結案"]
@@ -72,13 +75,17 @@ with tab_user:
         with col_tech:
             technician_input = st.text_input(
                 "👷 施工人員：",
-                value=st.session_state["saved_tech"],
+                value=st.session_state.get("saved_tech", ""),
                 placeholder="請輸入技師姓名或員編 (例: 王小明 / T1082)",
                 key="step1_tech_input",
                 help="必填欄位，確立本張工單責任歸屬"
             )
         with col_date:
-            repair_date = st.date_input("📅 施工/維修日期", key="step1_repair_date")
+            repair_date = st.date_input(
+                "📅 施工/維修日期", 
+                value=st.session_state.get("repair_date", datetime.date.today()),
+                key="step1_repair_date"
+            )
 
         st.markdown("---")
 
@@ -173,14 +180,21 @@ with tab_user:
     elif st.session_state["step"] == 2:
         st.subheader("【步驟 2】知識圖譜推論結果與 SOP 排查建議")
         
+        # 安全取值，避免 KeyError
+        current_tech = st.session_state.get("saved_tech", "現場技師")
+        current_date = st.session_state.get("repair_date", datetime.date.today())
+        current_device = st.session_state.get("device", "未知設備")
+        current_sound = st.session_state.get("sound", "未知聲響")
+        current_symptom = st.session_state.get("symptom", "未知現象")
+
         # 顯示工單基本資訊摘要
         col_info1, col_info2 = st.columns(2)
         with col_info1:
-            st.info(f"👷 **施工人員**：`{st.session_state['saved_tech']}` ｜ 📅 **日期**：`{st.session_state['repair_date']}`")
+            st.info(f"👷 **施工人員**：`{current_tech}` ｜ 📅 **日期**：`{current_date}`")
         with col_info2:
-            st.success(f"📱 **設備與現象**：`{st.session_state['device']}` ➔ `{st.session_state['sound']}` ➔ **{st.session_state['symptom']}**")
+            st.success(f"📱 **設備與現象**：`{current_device}` ➔ `{current_sound}` ➔ **{current_symptom}**")
 
-        paths = st.session_state["current_paths"]
+        paths = st.session_state.get("current_paths", [])
         for idx, p in enumerate(paths, 1):
             prob_pct = round(p['機率'] * 100, 1)
             tools_str = ', '.join(p['所需工具']) if p['所需工具'] else '通用檢修工具'
@@ -209,10 +223,13 @@ with tab_user:
     # ====================================================
     elif st.session_state["step"] == 3:
         st.subheader("【步驟 3】現場完工確認與自適應工單回報")
-        paths = st.session_state["current_paths"]
+        paths = st.session_state.get("current_paths", [])
 
-        # 直接顯示步驟 1 已記錄之人員與日期
-        st.markdown(f"**施工人員**：`{st.session_state['saved_tech']}` ｜ **維修日期**：`{st.session_state['repair_date']}`")
+        current_tech = st.session_state.get("saved_tech", "現場技師")
+        current_date = st.session_state.get("repair_date", datetime.date.today())
+
+        # 顯示步驟 1 已記錄之人員與日期
+        st.markdown(f"**施工人員**：`{current_tech}` ｜ **維修日期**：`{current_date}`")
 
         # 彙整工具清單供勾選
         all_tools = set()
@@ -254,14 +271,14 @@ with tab_user:
                     with driver.session() as s:
                         s.run(
                             c_query, 
-                            device=st.session_state["device"], 
-                            sound=st.session_state["sound"], 
-                            symptom=st.session_state["symptom"], 
+                            device=st.session_state.get("device", "類比話機"), 
+                            sound=st.session_state.get("sound", "無聲"), 
+                            symptom=st.session_state.get("symptom", ""), 
                             cause=new_cause, 
                             action=new_action, 
-                            technician=st.session_state["saved_tech"], 
+                            technician=current_tech, 
                             tools=selected_tools, 
-                            repair_date=st.session_state["repair_date"]
+                            repair_date=current_date
                         )
                     st.success("✅ 已成功送審並結案！")
                     # 重置狀態與人員，回到步驟 1
@@ -311,10 +328,10 @@ with tab_user:
                     with driver.session() as s:
                         s.run(
                             u_query, 
-                            symptom=st.session_state["symptom"], 
+                            symptom=st.session_state.get("symptom", ""), 
                             cause=chosen_cause, 
-                            technician=st.session_state["saved_tech"], 
-                            repair_date=st.session_state["repair_date"], 
+                            technician=current_tech, 
+                            repair_date=current_date, 
                             is_hit_top1=is_hit_top1, 
                             tools=selected_tools
                         )

@@ -46,7 +46,7 @@ with st.sidebar:
 tab_user, tab_admin = st.tabs(["🔧 現場診斷與回報 (一般技師)", "🛡️ 管理員專用後台 (需驗證)"])
 
 # ──────────────────────────────────────────
-# 分頁 1: 現場診斷與回報 (分步導引式精靈)
+# 分頁 1: 現場診斷與回報 (步驟 1 前置人員與日期)
 # ──────────────────────────────────────────
 with tab_user:
     # 1. 初始化步驟狀態與共用變數
@@ -56,17 +56,33 @@ with tab_user:
         st.session_state["saved_tech"] = ""
 
     # 頂部顯示當前排查進度條
-    steps_label = ["1. 現象選取", "2. 智能診斷", "3. 完工結案"]
+    steps_label = ["1. 登錄人員與選取現象", "2. 智能診斷與排查指引", "3. 完工確認與結案"]
     st.progress(st.session_state["step"] / 3.0)
     st.caption(f"📍 目前進度：步驟 {st.session_state['step']} / 3 —— **{steps_label[st.session_state['step'] - 1]}**")
     st.markdown("---")
 
     # ====================================================
-    # 步驟 1: 話機設備與具體現象選擇
+    # 步驟 1: 施工人員、日期登錄與話機現象選擇
     # ====================================================
     if st.session_state["step"] == 1:
-        st.subheader("【步驟 1】請選擇話機規格與具體故障特徵")
+        st.subheader("【步驟 1】登錄維修人員並選擇具體故障現象")
 
+        # 1-1. 前置施工人員與施工日期
+        col_tech, col_date = st.columns([2, 1])
+        with col_tech:
+            technician_input = st.text_input(
+                "👷 施工人員：",
+                value=st.session_state["saved_tech"],
+                placeholder="請輸入技師姓名或員編 (例: 王小明 / T1082)",
+                key="step1_tech_input",
+                help="必填欄位，確立本張工單責任歸屬"
+            )
+        with col_date:
+            repair_date = st.date_input("📅 施工/維修日期", key="step1_repair_date")
+
+        st.markdown("---")
+
+        # 1-2. 三階硬體分類連動選單
         c1, c2, c3 = st.columns(3)
         with c1:
             device_types = []
@@ -111,9 +127,12 @@ with tab_user:
         st.markdown("---")
         beam_k = st.slider("Beam Search 搜尋路徑數 (Top-K)：", min_value=1, max_value=3, value=2)
 
+        # 1-3. 提交驗證與推論
         if st.button("🚀 下一步：進行知識圖譜推論 ➔", type="primary"):
-            if not selected_symptom or "(查無" in selected_symptom:
-                st.warning("⚠️ 請先選擇有效的具體故障現象！")
+            if not technician_input.strip():
+                st.warning("⚠️ 請先於上方填寫施工人員姓名或工號！")
+            elif not selected_symptom or "(查無" in selected_symptom:
+                st.warning("⚠️ 請選擇有效的具體故障現象細項！")
             else:
                 with st.spinner("知識圖譜推論中..."):
                     query = """
@@ -141,6 +160,8 @@ with tab_user:
                         st.session_state["device"] = selected_device
                         st.session_state["sound"] = selected_sound
                         st.session_state["symptom"] = selected_symptom
+                        st.session_state["saved_tech"] = technician_input.strip()
+                        st.session_state["repair_date"] = repair_date
                         st.session_state["step"] = 2
                         st.rerun()
                     else:
@@ -151,7 +172,13 @@ with tab_user:
     # ====================================================
     elif st.session_state["step"] == 2:
         st.subheader("【步驟 2】知識圖譜推論結果與 SOP 排查建議")
-        st.info(f"當前診斷對象：`{st.session_state['device']}` ➔ `{st.session_state['sound']}` ➔ **{st.session_state['symptom']}**")
+        
+        # 顯示工單基本資訊摘要
+        col_info1, col_info2 = st.columns(2)
+        with col_info1:
+            st.info(f"👷 **施工人員**：`{st.session_state['saved_tech']}` ｜ 📅 **日期**：`{st.session_state['repair_date']}`")
+        with col_info2:
+            st.success(f"📱 **設備與現象**：`{st.session_state['device']}` ➔ `{st.session_state['sound']}` ➔ **{st.session_state['symptom']}**")
 
         paths = st.session_state["current_paths"]
         for idx, p in enumerate(paths, 1):
@@ -169,7 +196,7 @@ with tab_user:
 
         col_prev, col_next = st.columns([1, 4])
         with col_prev:
-            if st.button("⬅️ 返回重選現象"):
+            if st.button("⬅️ 返回修改人員/現象"):
                 st.session_state["step"] = 1
                 st.rerun()
         with col_next:
@@ -178,23 +205,14 @@ with tab_user:
                 st.rerun()
 
     # ====================================================
-    # 步驟 3: 施工資訊確認與工單寫入 (結案)
+    # 步驟 3: 現場完工確認與工單寫入 (結案)
     # ====================================================
     elif st.session_state["step"] == 3:
         st.subheader("【步驟 3】現場完工確認與自適應工單回報")
         paths = st.session_state["current_paths"]
 
-        col_fb1, col_fb2 = st.columns(2)
-        with col_fb1:
-            tech_val = st.text_input(
-                "👷 施工人員：",
-                value=st.session_state["saved_tech"],
-                placeholder="請輸入技師姓名/工號 (例: 王小明 / T1082)",
-                key="step3_tech_input"
-            )
-            st.session_state["saved_tech"] = tech_val.strip()
-        with col_fb2:
-            repair_date = st.date_input("📅 施工/維修日期")
+        # 直接顯示步驟 1 已記錄之人員與日期
+        st.markdown(f"**施工人員**：`{st.session_state['saved_tech']}` ｜ **維修日期**：`{st.session_state['repair_date']}`")
 
         # 彙整工具清單供勾選
         all_tools = set()
@@ -203,7 +221,11 @@ with tab_user:
                 all_tools.update(p["所需工具"])
         tool_options = list(all_tools) if all_tools else ["網路壓線鉗", "RJ45水晶頭", "網路測線儀", "三用電表"]
 
-        selected_tools = st.multiselect("🔧 本次實際使用之必備工具：", options=tool_options, default=tool_options[:2] if len(tool_options) >= 2 else tool_options)
+        selected_tools = st.multiselect(
+            "🔧 本次實際使用之必備工具：", 
+            options=tool_options, 
+            default=tool_options[:2] if len(tool_options) >= 2 else tool_options
+        )
 
         # 格式化真因單選清單
         raw_causes = [p["原因"] for p in paths]
@@ -217,9 +239,7 @@ with tab_user:
             new_cause = st.text_input("輸入實際發現的故障原因")
             new_action = st.text_input("輸入採取的具體處置對策")
             if st.button("📩 提交至審核暫存庫並結束工單", type="primary"):
-                if not st.session_state["saved_tech"]:
-                    st.warning("⚠️ 請填寫施工人員姓名！")
-                elif new_cause and new_action:
+                if new_cause and new_action:
                     c_query = """
                     MATCH (s:Symptom {name: $symptom})
                     CREATE (fb:PendingFeedback {
@@ -232,9 +252,19 @@ with tab_user:
                     CREATE (s)-[:HAS_PENDING_FEEDBACK]->(fb)
                     """
                     with driver.session() as s:
-                        s.run(c_query, device=st.session_state["device"], sound=st.session_state["sound"], symptom=st.session_state["symptom"], cause=new_cause, action=new_action, technician=st.session_state["saved_tech"], tools=selected_tools, repair_date=repair_date)
+                        s.run(
+                            c_query, 
+                            device=st.session_state["device"], 
+                            sound=st.session_state["sound"], 
+                            symptom=st.session_state["symptom"], 
+                            cause=new_cause, 
+                            action=new_action, 
+                            technician=st.session_state["saved_tech"], 
+                            tools=selected_tools, 
+                            repair_date=st.session_state["repair_date"]
+                        )
                     st.success("✅ 已成功送審並結案！")
-                    # 重置狀態回到步驟 1
+                    # 重置狀態與人員，回到步驟 1
                     st.session_state["saved_tech"] = ""
                     st.session_state["step"] = 1
                     st.rerun()
@@ -252,43 +282,48 @@ with tab_user:
                     st.rerun()
             with col_sub:
                 if st.button("🎉 確認完工並更新模型機率", type="primary"):
-                    if not st.session_state["saved_tech"]:
-                        st.warning("⚠️ 請先填寫施工人員姓名後再點擊結案！")
-                    else:
-                        is_hit_top1 = 1 if chosen_cause_idx == 0 else 0
-                        u_query = """
-                        MATCH (s:Symptom {name: $symptom})-[target:CAUSED_BY]->(rc:RootCause {name: $cause})
-                        CREATE (mo:MaintenanceOrder {
-                            repair_date: toString($repair_date),
-                            technician: $technician,
-                            symptom: $symptom,
-                            actual_cause: $cause,
-                            is_top1_hit: $is_hit_top1,
-                            tools: $tools,
-                            created_at: datetime()
-                        })
-                        CREATE (s)-[:LOGGED_IN]->(mo)
-                        MERGE (tech:Technician {name: $technician})
-                        MERGE (tech)-[:HANDLED]->(mo)
-                        FOREACH (t_name IN $tools |
-                            MERGE (t:Tool {name: t_name})
-                            MERGE (mo)-[:USED_TOOL]->(t)
+                    is_hit_top1 = 1 if chosen_cause_idx == 0 else 0
+                    u_query = """
+                    MATCH (s:Symptom {name: $symptom})-[target:CAUSED_BY]->(rc:RootCause {name: $cause})
+                    CREATE (mo:MaintenanceOrder {
+                        repair_date: toString($repair_date),
+                        technician: $technician,
+                        symptom: $symptom,
+                        actual_cause: $cause,
+                        is_top1_hit: $is_hit_top1,
+                        tools: $tools,
+                        created_at: datetime()
+                    })
+                    CREATE (s)-[:LOGGED_IN]->(mo)
+                    MERGE (tech:Technician {name: $technician})
+                    MERGE (tech)-[:HANDLED]->(mo)
+                    FOREACH (t_name IN $tools |
+                        MERGE (t:Tool {name: t_name})
+                        MERGE (mo)-[:USED_TOOL]->(t)
+                    )
+                    SET target.count = coalesce(target.count, 0) + 1
+                    WITH s
+                    MATCH (s)-[all_rel:CAUSED_BY]->(:RootCause)
+                    WITH s, sum(all_rel.count) AS total, collect(all_rel) AS list
+                    UNWIND list AS r
+                    SET r.prob = round((toFloat(r.count) / toFloat(total)) * 10000.0) / 10000.0
+                    """
+                    with driver.session() as s:
+                        s.run(
+                            u_query, 
+                            symptom=st.session_state["symptom"], 
+                            cause=chosen_cause, 
+                            technician=st.session_state["saved_tech"], 
+                            repair_date=st.session_state["repair_date"], 
+                            is_hit_top1=is_hit_top1, 
+                            tools=selected_tools
                         )
-                        SET target.count = coalesce(target.count, 0) + 1
-                        WITH s
-                        MATCH (s)-[all_rel:CAUSED_BY]->(:RootCause)
-                        WITH s, sum(all_rel.count) AS total, collect(all_rel) AS list
-                        UNWIND list AS r
-                        SET r.prob = round((toFloat(r.count) / toFloat(total)) * 10000.0) / 10000.0
-                        """
-                        with driver.session() as s:
-                            s.run(u_query, symptom=st.session_state["symptom"], cause=chosen_cause, technician=st.session_state["saved_tech"], repair_date=repair_date, is_hit_top1=is_hit_top1, tools=selected_tools)
 
-                        # 清空人員並將精靈指針重設回 Step 1
-                        st.session_state["saved_tech"] = ""
-                        st.session_state["step"] = 1
-                        st.toast(f"🎉 工單已成功結案！轉移機率已動態更新。", icon="✅")
-                        st.rerun()
+                    # 結案成功：清空人員、提示完成、重設步驟回 Step 1
+                    st.session_state["saved_tech"] = ""
+                    st.session_state["step"] = 1
+                    st.toast(f"🎉 工單已成功結案！轉移機率已動態更新。", icon="✅")
+                    st.rerun()
 
 # ──────────────────────────────────────────
 # 分頁 2: 管理員專屬後台 (需驗證權限)

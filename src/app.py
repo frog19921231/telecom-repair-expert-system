@@ -267,10 +267,11 @@ if btn_resolve:
                         st.rerun()
 
         # 方案皆非時的備用提報折疊區 (Expander)
-        with st.expander("❓ 以上推薦皆非實際原因？（提報現場全新處置方案）"):
+with st.expander("❓ 以上推薦皆非實際原因？（提報現場全新處置方案）"):
             new_cause = st.text_input("輸入實際發現的故障原因", key="exp_new_cause")
             new_action = st.text_input("輸入採取的具體處置對策", key="exp_new_action")
             new_tools = st.text_input("輸入自訂方案使用的必備工具 (逗號隔開)", key="exp_new_tools")
+            
             if st.button("📩 提交至審核暫存庫"):
                 if not st.session_state["saved_tech"]:
                     st.warning("⚠️ 請先於上方填寫施工人員姓名！")
@@ -304,7 +305,15 @@ if btn_resolve:
                             tools=parsed_tools,
                             repair_date=repair_date
                         )
-                    st.success("已記錄新處置方案並送出待審核！")
+                    
+                    # ---------------------------------------------
+                    # 👇 加入這裡：提交後同步清空施工人員輸入框
+                    # ---------------------------------------------
+                    st.session_state["saved_tech"] = ""
+                    st.session_state["current_tech_input"] = ""
+                    
+                    st.success("已記錄新處置方案並送出待審核！施工人員欄位已清空。")
+                    st.rerun()
                 else:
                     st.warning("請填寫完整原因與處置對策。")
 

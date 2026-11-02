@@ -181,24 +181,30 @@ with tab_user:
                 st.warning("該故障現象目前尚無關聯的推論路徑。")
 
 # ----------------------------------------------------
-    # 現場回報區 (串接優先序推薦，一鍵累進至統計)
+    # 現場回報區 (施工人員、日期、工具與真因)
     # ----------------------------------------------------
     if "current_paths" in st.session_state and st.session_state["current_paths"]:
         st.subheader("🛠️ 現場維修結果反饋與工單統計")
         
-        # 1. 施工日期與工具選取
-        col_fb1, col_fb2 = st.columns(2)
+        # 1. 施工基本資訊：施工人員、施工日期與必備工具
+        col_fb1, col_fb2, col_fb3 = st.columns(3)
         with col_fb1:
-            repair_date = st.date_input("📅 施工/維修日期", help="記錄本次工單完工日期，供模型學習演進曲線分析")
-        
-        # 彙整推論路徑中建議的必備工具
+            # 施工人員 (可輸入或從名單選取)
+            technician_list = ["王大明 (技師A)", "李小華 (技師B)", "陳工程師 (技師C)", "其他現場人員"]
+            selected_technician = st.selectbox("👷 施工人員", technician_list, help="選擇或指定本次實際執行維修的工程人員")
+            if selected_technician == "其他現場人員":
+                selected_technician = st.text_input("請輸入施工人員姓名/編號", value="現場技師")
+
+        with col_fb2:
+            repair_date = st.date_input("📅 施工/維修日期", help="記錄本次工單完工日期")
+
         all_suggested_tools = set()
         for p in st.session_state["current_paths"]:
             if p.get("所需工具"):
                 all_suggested_tools.update(p["所需工具"])
         tool_options = list(all_suggested_tools) if all_suggested_tools else ["網路壓線鉗", "RJ45水晶頭", "網路測線儀", "三用電表"]
 
-        with col_fb2:
+        with col_fb3:
             selected_tools = st.multiselect(
                 "🔧 本次施工使用之必備工具：",
                 options=tool_options,
@@ -232,6 +238,7 @@ with tab_user:
                         symptom: $symptom,
                         custom_cause: $cause,
                         custom_action: $action,
+                        technician: $technician,
                         tools: $tools,
                         repair_date: toString($repair_date),
                         created_at: datetime(),
@@ -248,27 +255,27 @@ with tab_user:
                             symptom=st.session_state["symptom"], 
                             cause=new_cause, 
                             action=new_action, 
+                            technician=selected_technician,
                             tools=parsed_tools,
                             repair_date=repair_date
                         )
-                    st.success(f"已記錄施工日期與工具，並送出新方案至待審核暫存庫！")
+                    st.success(f"已記錄施工人員【{selected_technician}】與方案，並送出至待審核暫存庫！")
                 else:
                     st.warning("請填寫完整原因與處置對策。")
         else:
-            # 解析被勾選的原始原因名稱
             chosen_cause_idx = display_options.index(selected_display)
             chosen_cause = raw_causes[chosen_cause_idx]
 
-            if st.button("✅ 確認回報並更新統計與機率"):
-                # 判定是否為 Top-1 命中
+            if st.button("✅ 確認回報並更新工單"):
                 is_hit_top1 = 1 if chosen_cause_idx == 0 else 0
 
                 u_query = """
                 MATCH (s:Symptom {name: $symptom})-[target:CAUSED_BY]->(rc:RootCause {name: $cause})
                 
-                // 1. 建立工單記錄節點 (包含施工日期、Top-1 命中標記與工具)
+                // 1. 建立工單記錄節點 (包含施工人員、施工日期、Top-1 命中標記與工具)
                 CREATE (mo:MaintenanceOrder {
                     repair_date: toString($repair_date),
+                    technician: $technician,
                     symptom: $symptom,
                     actual_cause: $cause,
                     is_top1_hit: $is_hit_top1,
@@ -277,13 +284,17 @@ with tab_user:
                 })
                 CREATE (s)-[:LOGGED_IN]->(mo)
                 
-                // 2. 建立工單與工具關聯
+                // 2. 建立施工人員節點與關聯
+                MERGE (tech:Technician {name: $technician})
+                MERGE (tech)-[:HANDLED]->(mo)
+
+                // 3. 建立工單與工具關聯
                 FOREACH (t_name IN $tools |
                     MERGE (t:Tool {name: t_name})
                     MERGE (mo)-[:USED_TOOL]->(t)
                 )
 
-                // 3. 馬可夫轉移次數累加並重新正規化機率
+                // 4. 馬可夫轉移次數累加並重新正規化機率
                 SET target.count = coalesce(target.count, 0) + 1
                 WITH s
                 MATCH (s)-[all_rel:CAUSED_BY]->(:RootCause)
@@ -296,12 +307,12 @@ with tab_user:
                         u_query, 
                         symptom=st.session_state["symptom"], 
                         cause=chosen_cause, 
+                        technician=selected_technician,
                         repair_date=repair_date, 
                         is_hit_top1=is_hit_top1,
                         tools=selected_tools
                     )
-                st.success(f"🎉 工單記錄成功！【{chosen_cause}】統計次數已累加，先驗機率已自動重新配權。")
-                st.info("💡 側邊欄統計面板已同步更新，累積命中率可於管理員後台查看曲線。")
+                st.success(f"🎉 工單記錄成功！施工人員：`{selected_technician}` ｜ 原因：`{chosen_cause}`。轉移機率已動態更新！")
 
 # ──────────────────────────────────────────
 # 分頁 2: 管理員專屬後台 (需驗證權限)

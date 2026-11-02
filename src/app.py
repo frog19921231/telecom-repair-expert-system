@@ -134,7 +134,9 @@ with tab_user:
             with st.spinner("知識圖譜推論中..."):
                 query = """
                 MATCH (d:DeviceType {name: $device})-[:HAS_AUDIO_STATE]->(ss:SoundStatus {name: $sound})-[:HAS_SYMPTOM]->(s:Symptom {name:$symptom})-[cb:CAUSED_BY]->(rc:RootCause)-[:RESOLVED_BY]->(act:Action)
-                MATCH (rc)-[:LOCATED_IN]->(comp:Component)
+                ...
+                ORDER BY cb.prob DESC
+                LIMIT $k
                 OPTIONAL MATCH (act)-[:REQUIRES]->(tool:Tool)
                 RETURN
                     rc.name AS 原因,

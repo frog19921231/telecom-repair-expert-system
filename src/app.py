@@ -50,7 +50,7 @@ tab_user, tab_admin = st.tabs(["🔧 現場診斷與回報 (一般技師)", "�
 # 分頁 1: 現場診斷與回報 (分步導引式精靈)
 # ──────────────────────────────────────────
 with tab_user:
-    # 1. 初始化步驟狀態與共用變數 (包含日期防呆)
+    # 1. 初始化步驟狀態與共用變數
     if "step" not in st.session_state:
         st.session_state["step"] = 1
     if "saved_tech" not in st.session_state:
@@ -64,7 +64,7 @@ with tab_user:
     st.caption(f"📍 目前進度：步驟 {st.session_state['step']} / 3 —— **{steps_label[st.session_state['step'] - 1]}**")
     st.markdown("---")
 
-# ====================================================
+    # ====================================================
     # 步驟 1: 施工人員、日期登錄與話機現象選擇
     # ====================================================
     if st.session_state["step"] == 1:
@@ -161,7 +161,7 @@ with tab_user:
         st.markdown("---")
         beam_k = st.slider("Beam Search 搜尋路徑數 (Top-K)：", min_value=1, max_value=3, value=2)
 
-# 1-3. 提交驗證與推論
+        # 1-3. 提交驗證與推論
         if st.button("🚀 下一步：進行知識圖譜推論 ➔", type="primary"):
             if not final_tech_name:
                 st.warning("⚠️ 請先選擇或手動填寫施工人員姓名！")
@@ -169,26 +169,44 @@ with tab_user:
                 st.warning("⚠️ 請選擇有效的具體故障現象細項！")
             else:
                 with st.spinner("知識圖譜推論中..."):
-                    # ... [原本的推論 Cypher 查詢維持不變] ...
+                    query = """
+                    MATCH (d:DeviceType {name: $device})-[:HAS_AUDIO_STATE]->(ss:SoundStatus {name: $sound})-[:HAS_SYMPTOM]->(s:Symptom {name: $symptom})-[cb:CAUSED_BY]->(rc:RootCause)-[:RESOLVED_BY]->(act:Action)
+                    OPTIONAL MATCH (rc)-[:LOCATED_IN]->(comp:Component)
+                    OPTIONAL MATCH (act)-[:REQUIRES]->(tool:Tool)
+                    WITH rc, cb, comp, act, collect(DISTINCT tool.name) AS tools
+                    RETURN
+                        rc.name AS 原因,
+                        coalesce(cb.prob, 0.0) AS 機率,
+                        coalesce(comp.location, '現場設備端') AS 位置,
+                        act.name AS 維修步驟,
+                        coalesce(act.est_time_min, 15) AS 耗時_分鐘,
+                        tools AS 所需工具
+                    ORDER BY 機率 DESC
+                    LIMIT toInteger($k)
+                    """
+                    with driver.session() as session:
+                        paths = [r.data() for r in session.run(
+                            query, device=selected_device, sound=selected_sound, symptom=selected_symptom, k=int(beam_k)
+                        )]
 
                     if paths:
                         st.session_state["current_paths"] = paths
                         st.session_state["device"] = selected_device
                         st.session_state["sound"] = selected_sound
                         st.session_state["symptom"] = selected_symptom
-                        st.session_state["saved_tech"] = final_tech_name  # 寫入選定或輸入的人員
+                        st.session_state["saved_tech"] = final_tech_name
                         st.session_state["repair_date"] = repair_date
                         st.session_state["step"] = 2
                         st.rerun()
                     else:
                         st.error("該故障現象目前尚無關聯的推論路徑，請確認知識圖譜關聯。")
+
     # ====================================================
     # 步驟 2: 方案推薦與現場排查指南
     # ====================================================
     elif st.session_state["step"] == 2:
         st.subheader("【步驟 2】知識圖譜推論結果與 SOP 排查建議")
         
-        # 安全取值，避免 KeyError
         current_tech = st.session_state.get("saved_tech", "現場技師")
         current_date = st.session_state.get("repair_date", datetime.date.today())
         current_device = st.session_state.get("device", "未知設備")
@@ -236,7 +254,6 @@ with tab_user:
         current_tech = st.session_state.get("saved_tech", "現場技師")
         current_date = st.session_state.get("repair_date", datetime.date.today())
 
-        # 顯示步驟 1 已記錄之人員與日期
         st.markdown(f"**施工人員**：`{current_tech}` ｜ **維修日期**：`{current_date}`")
 
         # 彙整工具清單供勾選
@@ -252,7 +269,6 @@ with tab_user:
             default=tool_options[:2] if len(tool_options) >= 2 else tool_options
         )
 
-        # 格式化真因單選清單
         raw_causes = [p["原因"] for p in paths]
         display_options = [f"優先序 #{idx}：【{p['原因']}】 (先驗機率: {round(p['機率']*100, 1)}%)" for idx, p in enumerate(paths, 1)]
         display_options.append("❓ 以上皆非（提報現場新處置方案）")
@@ -289,7 +305,6 @@ with tab_user:
                             repair_date=current_date
                         )
                     st.success("✅ 已成功送審並結案！")
-                    # 重置狀態與人員，回到步驟 1
                     st.session_state["saved_tech"] = ""
                     st.session_state["step"] = 1
                     st.rerun()
@@ -344,7 +359,6 @@ with tab_user:
                             tools=selected_tools
                         )
 
-                    # 結案成功：清空人員、提示完成、重設步驟回 Step 1
                     st.session_state["saved_tech"] = ""
                     st.session_state["step"] = 1
                     st.toast(f"🎉 工單已成功結案！轉移機率已動態更新。", icon="✅")

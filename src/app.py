@@ -1,4 +1,4 @@
-﻿import streamlit as st
+import streamlit as st
 from neo4j import GraphDatabase
 
 # 1. 系統連線設定 (優先讀取 Secrets)
@@ -163,156 +163,111 @@ with tab_user:
                 st.session_state["device"] = selected_device
                 st.session_state["sound"] = selected_sound
 
-if paths:
-                st.success(f"🎯 針對【{selected_device} ➔ {selected_sound}】推論完成！推薦前 {len(paths)} 項最優先排查方案：")
+    # ----------------------------------------------------
+    # 推薦方案展示與原地一鍵結案區
+    # ----------------------------------------------------
+    if "current_paths" in st.session_state and st.session_state["current_paths"]:
+        paths = st.session_state["current_paths"]
+        st.success(f"🎯 針對【{st.session_state['device']} ➔ {st.session_state['sound']}】推論完成！推薦前 {len(paths)} 項最優先排查方案：")
+        
+        # 施工基本資訊：人員記憶與施工日期
+        if "saved_tech" not in st.session_state:
+            st.session_state["saved_tech"] = ""
+        
+        c_tech, c_date = st.columns([2, 1])
+        with c_tech:
+            tech_val = st.text_input(
+                "👷 當前施工人員 (全日自動帶入)：", 
+                value=st.session_state["saved_tech"],
+                placeholder="請輸入技師姓名/工號 (例: 王小明 / T1082)",
+                key="current_tech_input"
+            )
+            st.session_state["saved_tech"] = tech_val.strip()
+        with c_date:
+            repair_date = st.date_input("📅 施工/維修日期", help="記錄本次工單完工日期")
+
+        st.markdown("---")
+
+        # 逐一渲染推薦方案卡片，並在卡片內直接提供「一鍵完工結案」
+        for idx, p in enumerate(paths, 1):
+            prob_pct = round(p['機率'] * 100, 1)
+            tools_str = ', '.join(p['所需工具']) if p['所需工具'] else '通用檢修工具'
+            
+            with st.container():
+                st.markdown(f"#### 優先序 #{idx}：【{p['原因']}】 (先驗機率: `{prob_pct}%`)")
+                col_m1, col_m2, col_m3 = st.columns(3)
+                col_m1.metric("📍 檢查位置", p['位置'])
+                col_m2.metric("⏱️ 預估耗時", f"{p['耗時_分鐘']} 分鐘")
+                col_m3.metric("🔧 必備工具", tools_str)
+                st.info(f"👉 **建議處置作為**：{p['維修步驟']}")
                 
-                # 頂部顯示當前施工人員 (自動帶入記憶)
-                if "saved_tech" not in st.session_state:
-                    st.session_state["saved_tech"] = ""
-                
-                c_tech, c_date = st.columns([2, 1])
-                with c_tech:
-                    tech_val = st.text_input(
-                        "👷 當前施工人員 (全日自動帶入)：", 
-                        value=st.session_state["saved_tech"],
-                        placeholder="請輸入技師姓名/工號 (例: 陳技師)",
-                        key="current_tech_input"
+                # 核心防呆：在處置 SOP 正下方放置一鍵完工按鈕
+                col_btn, col_hint = st.columns([1, 3])
+                with col_btn:
+                    btn_resolve = st.button(
+                        f"✅ 確認以此方案排除 (一鍵結案)", 
+                        key=f"btn_resolve_{idx}",
+                        type="primary" if idx == 1 else "secondary"
                     )
-                    st.session_state["saved_tech"] = tech_val.strip()
-                with c_date:
-                    repair_date = st.date_input("📅 維修日期", help="記錄工單完工日期")
+                with col_hint:
+                    st.caption("點擊後自動記錄工單、回填必備工具並即時累進演算法機率。")
+
+                if btn_resolve:
+                    if not st.session_state["saved_tech"]:
+                        st.warning("⚠️ 請先於上方填寫施工人員姓名後再點擊結案！")
+                    else:
+                        is_hit_top1 = 1 if idx == 1 else 0
+                        tools_to_log = p['所需工具'] if p['所需工具'] else ["通用檢修工具"]
+
+                        u_query = """
+                        MATCH (s:Symptom {name: $symptom})-[target:CAUSED_BY]->(rc:RootCause {name: $cause})
+                        CREATE (mo:MaintenanceOrder {
+                            repair_date: toString($repair_date),
+                            technician: $technician,
+                            symptom: $symptom,
+                            actual_cause: $cause,
+                            is_top1_hit: $is_hit_top1,
+                            tools: $tools,
+                            created_at: datetime()
+                        })
+                        CREATE (s)-[:LOGGED_IN]->(mo)
+                        MERGE (tech:Technician {name: $technician})
+                        MERGE (tech)-[:HANDLED]->(mo)
+                        FOREACH (t_name IN $tools |
+                            MERGE (t:Tool {name: t_name})
+                            MERGE (mo)-[:USED_TOOL]->(t)
+                        )
+                        SET target.count = coalesce(target.count, 0) + 1
+                        WITH s
+                        MATCH (s)-[all_rel:CAUSED_BY]->(:RootCause)
+                        WITH s, sum(all_rel.count) AS total, collect(all_rel) AS list
+                        UNWIND list AS r
+                        SET r.prob = round((toFloat(r.count) / toFloat(total)) * 10000.0) / 10000.0
+                        """
+                        with driver.session() as s:
+                            s.run(
+                                u_query,
+                                symptom=st.session_state["symptom"],
+                                cause=p['原因'],
+                                technician=st.session_state["saved_tech"],
+                                repair_date=repair_date,
+                                is_hit_top1=is_hit_top1,
+                                tools=tools_to_log
+                            )
+                        st.success(f"🎉 工單已成功自動建檔！【{p['原因']}】次數 +1，模型機率已即時動態更新！")
+                        st.rerun()
 
                 st.markdown("---")
 
-                # 逐一渲染推薦方案卡片，並在卡片內直接提供「一鍵完工回報」
-                for idx, p in enumerate(paths, 1):
-                    prob_pct = round(p['機率'] * 100, 1)
-                    tools_str = ', '.join(p['所需工具']) if p['所需工具'] else '通用檢修工具'
-                    
-                    with st.container():
-                        st.markdown(f"#### 優先序 #{idx}：【{p['原因']}】 (先驗機率: `{prob_pct}%`)")
-                        col_m1, col_m2, col_m3 = st.columns(3)
-                        col_m1.metric("📍 檢查位置", p['位置'])
-                        col_m2.metric("⏱️ 預估耗時", f"{p['耗時_分鐘']} 分鐘")
-                        col_m3.metric("🔧 必備工具", tools_str)
-                        st.info(f"👉 **建議處置作為**：{p['維修步驟']}")
-                        
-                        # ⭐ 核心防呆：在處置 SOP 正下方放置一鍵完工按鈕
-                        col_btn, col_hint = st.columns([1, 3])
-                        with col_btn:
-                            btn_resolve = st.button(
-                                f"✅ 確認以此方案排除 (一鍵結案)", 
-                                key=f"btn_resolve_{idx}",
-                                type="primary" if idx == 1 else "secondary"
-                            )
-                        with col_hint:
-                            st.caption("點擊後自動記錄工單、回填必備工具並即時累進演算法機率。")
-
-                        if btn_resolve:
-                            if not st.session_state["saved_tech"]:
-                                st.warning("⚠️ 請先於上方填寫施工人員姓名後再點擊結案！")
-                            else:
-                                is_hit_top1 = 1 if idx == 1 else 0
-                                tools_to_log = p['所需工具'] if p['所需工具'] else ["通用檢修工具"]
-
-                                u_query = """
-                                MATCH (s:Symptom {name: $symptom})-[target:CAUSED_BY]->(rc:RootCause {name: $cause})
-                                CREATE (mo:MaintenanceOrder {
-                                    repair_date: toString($repair_date),
-                                    technician: $technician,
-                                    symptom: $symptom,
-                                    actual_cause: $cause,
-                                    is_top1_hit: $is_hit_top1,
-                                    tools: $tools,
-                                    created_at: datetime()
-                                })
-                                CREATE (s)-[:LOGGED_IN]->(mo)
-                                MERGE (tech:Technician {name: $technician})
-                                MERGE (tech)-[:HANDLED]->(mo)
-                                FOREACH (t_name IN $tools |
-                                    MERGE (t:Tool {name: t_name})
-                                    MERGE (mo)-[:USED_TOOL]->(t)
-                                )
-                                SET target.count = coalesce(target.count, 0) + 1
-                                WITH s
-                                MATCH (s)-[all_rel:CAUSED_BY]->(:RootCause)
-                                WITH s, sum(all_rel.count) AS total, collect(all_rel) AS list
-                                UNWIND list AS r
-                                SET r.prob = round((toFloat(r.count) / toFloat(total)) * 10000.0) / 10000.0
-                                """
-                                with driver.session() as s:
-                                    s.run(
-                                        u_query,
-                                        symptom=selected_symptom,
-                                        cause=p['原因'],
-                                        technician=st.session_state["saved_tech"],
-                                        repair_date=repair_date,
-                                        is_hit_top1=is_hit_top1,
-                                        tools=tools_to_log
-                                    )
-                                st.success(f"🎉 工單已成功自動建檔！【{p['原因']}】次數 +1，模型機率已即時動態更新！")
-                                st.rerun()
-
-                        st.markdown("---")
-            else:
-                st.warning("該故障現象目前尚無關聯的推論路徑。")
-
-# ----------------------------------------------------
-    # 現場回報區 (施工人員採純文字輸入)
-    # ----------------------------------------------------
-    if "current_paths" in st.session_state and st.session_state["current_paths"]:
-        st.subheader("🛠️ 現場維修結果反饋與工單統計")
-        
-        # 1. 施工基本資訊：施工人員(文字輸入)、施工日期與必備工具
-        col_fb1, col_fb2, col_fb3 = st.columns(3)
-        with col_fb1:
-            # 施工人員改為純文字手動輸入
-            technician_input = st.text_input(
-                "👷 施工人員：",
-                value="",
-                placeholder="請輸入技師姓名或員編 (例: 王小明 / T1082)",
-                help="填入現場實際執行維修的工程人員資訊"
-            )
-
-        with col_fb2:
-            repair_date = st.date_input("📅 施工/維修日期", help="記錄本次工單完工日期")
-
-        all_suggested_tools = set()
-        for p in st.session_state["current_paths"]:
-            if p.get("所需工具"):
-                all_suggested_tools.update(p["所需工具"])
-        tool_options = list(all_suggested_tools) if all_suggested_tools else ["網路壓線鉗", "RJ45水晶頭", "網路測線儀", "三用電表"]
-
-        with col_fb3:
-            selected_tools = st.multiselect(
-                "🔧 本次施工使用之必備工具：",
-                options=tool_options,
-                default=tool_options[:2] if len(tool_options) >= 2 else tool_options,
-                help="記錄現場實際排除故障所使用的工具或儀表"
-            )
-
-        # 2. 格式化選項，明確帶出優先序與機率
-        raw_causes = [p["原因"] for p in st.session_state["current_paths"]]
-        display_options = []
-        for idx, p in enumerate(st.session_state["current_paths"], 1):
-            prob_pct = round(p["機率"] * 100, 1)
-            display_options.append(f"優先序 #{idx}：【{p['原因']}】 (先驗機率: {prob_pct}%)")
-        display_options.append("❓ 以上皆非（提報現場新處置方案）")
-
-        selected_display = st.radio("請勾選現場實際解決問題的真因：", display_options)
-
-        # 3. 處理提交邏輯 (包含防呆檢查)
-        if selected_display == "❓ 以上皆非（提報現場新處置方案）":
-            new_cause = st.text_input("輸入實際發現的故障原因")
-            new_action = st.text_input("輸入採取的具體處置對策")
-            custom_tools_str = st.text_input("輸入自訂方案使用的必備工具 (多項請以逗號隔開)", value=", ".join(selected_tools))
-            
+        # 方案皆非時的備用提報折疊區 (Expander)
+        with st.expander("❓ 以上推薦皆非實際原因？（提報現場全新處置方案）"):
+            new_cause = st.text_input("輸入實際發現的故障原因", key="exp_new_cause")
+            new_action = st.text_input("輸入採取的具體處置對策", key="exp_new_action")
+            new_tools = st.text_input("輸入自訂方案使用的必備工具 (逗號隔開)", key="exp_new_tools")
             if st.button("📩 提交至審核暫存庫"):
-                if not technician_input.strip():
-                    st.warning("⚠️ 請先填寫施工人員姓名或編號！")
-                elif not (new_cause and new_action):
-                    st.warning("⚠️ 請填寫完整原因與處置對策。")
-                else:
+                if not st.session_state["saved_tech"]:
+                    st.warning("⚠️ 請先於上方填寫施工人員姓名！")
+                elif new_cause and new_action:
                     c_query = """
                     MATCH (s:Symptom {name: $symptom})
                     CREATE (fb:PendingFeedback {
@@ -329,74 +284,22 @@ if paths:
                     })
                     CREATE (s)-[:HAS_PENDING_FEEDBACK]->(fb)
                     """
-                    parsed_tools = [t.strip() for t in custom_tools_str.split(",") if t.strip()]
+                    parsed_tools = [t.strip() for t in new_tools.split(",") if t.strip()]
                     with driver.session() as s:
                         s.run(
-                            c_query, 
-                            device=st.session_state["device"], 
-                            sound=st.session_state["sound"], 
-                            symptom=st.session_state["symptom"], 
-                            cause=new_cause, 
-                            action=new_action, 
-                            technician=technician_input.strip(),
+                            c_query,
+                            device=st.session_state["device"],
+                            sound=st.session_state["sound"],
+                            symptom=st.session_state["symptom"],
+                            cause=new_cause,
+                            action=new_action,
+                            technician=st.session_state["saved_tech"],
                             tools=parsed_tools,
                             repair_date=repair_date
                         )
-                    st.success(f"已記錄施工人員【{technician_input.strip()}】與新方案，並送出至待審核暫存庫！")
-        else:
-            chosen_cause_idx = display_options.index(selected_display)
-            chosen_cause = raw_causes[chosen_cause_idx]
-
-            if st.button("✅ 確認回報並更新工單"):
-                if not technician_input.strip():
-                    st.warning("⚠️ 請先填寫施工人員姓名或編號！")
+                    st.success("已記錄新處置方案並送出待審核！")
                 else:
-                    is_hit_top1 = 1 if chosen_cause_idx == 0 else 0
-
-                    u_query = """
-                    MATCH (s:Symptom {name: $symptom})-[target:CAUSED_BY]->(rc:RootCause {name: $cause})
-                    
-                    // 1. 建立工單記錄節點 (包含施工人員、施工日期、Top-1 命中標記與工具)
-                    CREATE (mo:MaintenanceOrder {
-                        repair_date: toString($repair_date),
-                        technician: $technician,
-                        symptom: $symptom,
-                        actual_cause: $cause,
-                        is_top1_hit: $is_hit_top1,
-                        tools: $tools,
-                        created_at: datetime()
-                    })
-                    CREATE (s)-[:LOGGED_IN]->(mo)
-                    
-                    // 2. 建立施工人員節點與關聯
-                    MERGE (tech:Technician {name: $technician})
-                    MERGE (tech)-[:HANDLED]->(mo)
-
-                    // 3. 建立工單與工具關聯
-                    FOREACH (t_name IN $tools |
-                        MERGE (t:Tool {name: t_name})
-                        MERGE (mo)-[:USED_TOOL]->(t)
-                    )
-
-                    // 4. 馬可夫轉移次數累加並重新正規化機率
-                    SET target.count = coalesce(target.count, 0) + 1
-                    WITH s
-                    MATCH (s)-[all_rel:CAUSED_BY]->(:RootCause)
-                    WITH s, sum(all_rel.count) AS total, collect(all_rel) AS list
-                    UNWIND list AS r
-                    SET r.prob = round((toFloat(r.count) / toFloat(total)) * 10000.0) / 10000.0
-                    """
-                    with driver.session() as s:
-                        s.run(
-                            u_query, 
-                            symptom=st.session_state["symptom"], 
-                            cause=chosen_cause, 
-                            technician=technician_input.strip(),
-                            repair_date=repair_date, 
-                            is_hit_top1=is_hit_top1,
-                            tools=selected_tools
-                        )
-                    st.success(f"🎉 工單記錄成功！施工人員：`{technician_input.strip()}` ｜ 原因：`{chosen_cause}`。統計數據與先驗機率已動態更新！")
+                    st.warning("請填寫完整原因與處置對策。")
 
 # ──────────────────────────────────────────
 # 分頁 2: 管理員專屬後台 (需驗證權限)

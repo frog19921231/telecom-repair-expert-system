@@ -1,4 +1,6 @@
 import datetime
+import time
+import pandas as pd
 import streamlit as st
 from neo4j import GraphDatabase
 
@@ -50,16 +52,16 @@ tab_user, tab_admin = st.tabs(["🔧 現場診斷與回報 (一般技師)", "�
 # 分頁 1: 現場診斷與回報 (分步導引式精靈)
 # ──────────────────────────────────────────
 with tab_user:
-    # 1. 初始化步驟狀態與共用變數
     if "step" not in st.session_state:
         st.session_state["step"] = 1
     if "saved_tech" not in st.session_state:
         st.session_state["saved_tech"] = ""
     if "repair_date" not in st.session_state:
         st.session_state["repair_date"] = datetime.date.today()
+    if "start_repair_timestamp" not in st.session_state:
+        st.session_state["start_repair_timestamp"] = None
 
-    # 頂部顯示當前排查進度條
-    steps_label = ["1. 登錄人員與選取現象", "2. 智能診斷與排查指引", "3. 完工確認與結案"]
+    steps_label = ["1. 登錄人員與選取現象", "2. 智能診斷與排查指引 (計時中)", "3. 完工耗時確認與結案"]
     st.progress(st.session_state["step"] / 3.0)
     st.caption(f"📍 目前進度：步驟 {st.session_state['step']} / 3 —— **{steps_label[st.session_state['step'] - 1]}**")
     st.markdown("---")
@@ -70,7 +72,6 @@ with tab_user:
     if st.session_state["step"] == 1:
         st.subheader("【步驟 1】登錄維修人員並選擇具體故障現象")
 
-        # 1-1. 動態讀取歷史技師名單並提供下拉/手動雙軌輸入
         historical_techs = []
         try:
             with driver.session() as session:
@@ -87,8 +88,6 @@ with tab_user:
             saved_tech_val = st.session_state.get("saved_tech", "")
             if saved_tech_val in historical_techs:
                 default_tech_idx = historical_techs.index(saved_tech_val)
-            elif not historical_techs:
-                default_tech_idx = 0
 
             selected_tech_choice = st.selectbox(
                 "👷 選擇施工人員：",
@@ -116,7 +115,6 @@ with tab_user:
 
         st.markdown("---")
 
-        # 1-2. 三階硬體分類連動選單
         c1, c2, c3 = st.columns(3)
         with c1:
             device_types = []
@@ -159,9 +157,8 @@ with tab_user:
             selected_symptom = st.selectbox("【層級 3】具體故障現象細項：", symptom_list if symptom_list else ["(查無對應現象)"])
 
         st.markdown("---")
-        beam_k = st.slider("Beam Search 搜尋路徑數 (Top-K)：", min_value=1, max_value=3, value=2)
+        beam_k = st.slider("顯示排查路徑數 (Top-K)：", min_value=1, max_value=3, value=2, help="預設顯示 Top-2，後台固定評估 Top-3")
 
-        # 1-3. 提交驗證與推論
         if st.button("🚀 下一步：進行知識圖譜推論 ➔", type="primary"):
             if not final_tech_name:
                 st.warning("⚠️ 請先選擇或手動填寫施工人員姓名！")
@@ -182,27 +179,32 @@ with tab_user:
                         coalesce(act.est_time_min, 15) AS 耗時_分鐘,
                         tools AS 所需工具
                     ORDER BY 機率 DESC
-                    LIMIT toInteger($k)
+                    LIMIT 3
                     """
                     with driver.session() as session:
                         paths = [r.data() for r in session.run(
-                            query, device=selected_device, sound=selected_sound, symptom=selected_symptom, k=int(beam_k)
+                            query, device=selected_device, sound=selected_sound, symptom=selected_symptom
                         )]
 
                     if paths:
                         st.session_state["current_paths"] = paths
+                        st.session_state["display_k"] = int(beam_k)
                         st.session_state["device"] = selected_device
                         st.session_state["sound"] = selected_sound
                         st.session_state["symptom"] = selected_symptom
                         st.session_state["saved_tech"] = final_tech_name
                         st.session_state["repair_date"] = repair_date
+                        
+                        # 啟動背景維修計時器
+                        st.session_state["start_repair_timestamp"] = time.time()
+                        
                         st.session_state["step"] = 2
                         st.rerun()
                     else:
                         st.error("該故障現象目前尚無關聯的推論路徑，請確認知識圖譜關聯。")
 
     # ====================================================
-    # 步驟 2: 方案推薦與現場排查指南
+    # 步驟 2: 方案推薦與現場排查指南 (背景持續計時)
     # ====================================================
     elif st.session_state["step"] == 2:
         st.subheader("【步驟 2】知識圖譜推論結果與 SOP 排查建議")
@@ -212,16 +214,18 @@ with tab_user:
         current_device = st.session_state.get("device", "未知設備")
         current_sound = st.session_state.get("sound", "未知聲響")
         current_symptom = st.session_state.get("symptom", "未知現象")
+        display_k = st.session_state.get("display_k", 2)
 
-        # 顯示工單基本資訊摘要
-        col_info1, col_info2 = st.columns(2)
+        col_info1, col_info2, col_info3 = st.columns([2, 2, 1])
         with col_info1:
             st.info(f"👷 **施工人員**：`{current_tech}` ｜ 📅 **日期**：`{current_date}`")
         with col_info2:
             st.success(f"📱 **設備與現象**：`{current_device}` ➔ `{current_sound}` ➔ **{current_symptom}**")
+        with col_info3:
+            st.warning("⏱️ **工時已啟動計時**")
 
         paths = st.session_state.get("current_paths", [])
-        for idx, p in enumerate(paths, 1):
+        for idx, p in enumerate(paths[:display_k], 1):
             prob_pct = round(p['機率'] * 100, 1)
             tools_str = ', '.join(p['所需工具']) if p['所需工具'] else '通用檢修工具'
 
@@ -245,7 +249,7 @@ with tab_user:
                 st.rerun()
 
     # ====================================================
-    # 步驟 3: 現場完工確認與工單寫入 (結案)
+    # 步驟 3: 現場完工確認與工單寫入 (確認實際耗時)
     # ====================================================
     elif st.session_state["step"] == 3:
         st.subheader("【步驟 3】現場完工確認與自適應工單回報")
@@ -254,9 +258,24 @@ with tab_user:
         current_tech = st.session_state.get("saved_tech", "現場技師")
         current_date = st.session_state.get("repair_date", datetime.date.today())
 
-        st.markdown(f"**施工人員**：`{current_tech}` ｜ **維修日期**：`{current_date}`")
+        # 計算背景經過的分鐘數
+        elapsed_minutes = 15  # 預設基準
+        if st.session_state.get("start_repair_timestamp"):
+            calc_diff = (time.time() - st.session_state["start_repair_timestamp"]) / 60.0
+            elapsed_minutes = max(1, int(round(calc_diff)))
 
-        # 彙整工具清單供勾選
+        col_sum1, col_sum2 = st.columns(2)
+        with col_sum1:
+            st.markdown(f"**施工人員**：`{current_tech}` ｜ **維修日期**：`{current_date}`")
+        with col_sum2:
+            actual_duration = st.number_input(
+                "⏱️ 本次實際排查修復耗時 (分鐘)：",
+                min_value=1,
+                max_value=300,
+                value=elapsed_minutes,
+                help="系統依據進入步驟 2 至結案自動推算，技師可依現場實際情況微調"
+            )
+
         all_tools = set()
         for p in paths:
             if p.get("所需工具"):
@@ -275,7 +294,7 @@ with tab_user:
 
         selected_choice = st.radio("請勾選實際解決問題的真因：", display_options)
 
-        # 情境 A: 提報全新處置
+        # 情境 A: 提報全新處置 (hit_rank = 0)
         if selected_choice == "❓ 以上皆非（提報現場新處置方案）":
             new_cause = st.text_input("輸入實際發現的故障原因")
             new_action = st.text_input("輸入採取的具體處置對策")
@@ -288,6 +307,7 @@ with tab_user:
                         custom_cause: $cause, custom_action: $action,
                         technician: $technician, tools: $tools,
                         repair_date: toString($repair_date),
+                        actual_duration_min: $duration,
                         created_at: datetime(), status: 'PENDING_REVIEW'
                     })
                     CREATE (s)-[:HAS_PENDING_FEEDBACK]->(fb)
@@ -302,18 +322,22 @@ with tab_user:
                             action=new_action, 
                             technician=current_tech, 
                             tools=selected_tools, 
-                            repair_date=current_date
+                            repair_date=current_date,
+                            duration=int(actual_duration)
                         )
                     st.success("✅ 已成功送審並結案！")
                     st.session_state["saved_tech"] = ""
+                    st.session_state["start_repair_timestamp"] = None
                     st.session_state["step"] = 1
                     st.rerun()
                 else:
                     st.warning("請填寫完整原因與處置對策。")
-        # 情境 B: 現有選項命中結案
+        # 情境 B: 現有選項命中結案 (記錄實際耗時與預估耗時)
         else:
             chosen_cause_idx = display_options.index(selected_choice)
             chosen_cause = raw_causes[chosen_cause_idx]
+            hit_rank = chosen_cause_idx + 1
+            estimated_duration = paths[chosen_cause_idx].get("耗時_分鐘", 15)
 
             col_p3, col_sub = st.columns([1, 4])
             with col_p3:
@@ -322,7 +346,6 @@ with tab_user:
                     st.rerun()
             with col_sub:
                 if st.button("🎉 確認完工並更新模型機率", type="primary"):
-                    is_hit_top1 = 1 if chosen_cause_idx == 0 else 0
                     u_query = """
                     MATCH (s:Symptom {name: $symptom})-[target:CAUSED_BY]->(rc:RootCause {name: $cause})
                     CREATE (mo:MaintenanceOrder {
@@ -330,7 +353,13 @@ with tab_user:
                         technician: $technician,
                         symptom: $symptom,
                         actual_cause: $cause,
-                        is_top1_hit: $is_hit_top1,
+                        hit_rank: $hit_rank,
+                        is_top1_hit: CASE WHEN $hit_rank = 1 THEN 1 ELSE 0 END,
+                        is_top2_hit: CASE WHEN $hit_rank IN [1, 2] THEN 1 ELSE 0 END,
+                        is_top3_hit: CASE WHEN $hit_rank IN [1, 2, 3] THEN 1 ELSE 0 END,
+                        reciprocal_rank: CASE WHEN $hit_rank > 0 THEN 1.0 / toFloat($hit_rank) ELSE 0.0 END,
+                        actual_duration_min: $actual_duration,
+                        estimated_duration_min: $est_duration,
                         tools: $tools,
                         created_at: datetime()
                     })
@@ -355,13 +384,16 @@ with tab_user:
                             cause=chosen_cause, 
                             technician=current_tech, 
                             repair_date=current_date, 
-                            is_hit_top1=is_hit_top1, 
+                            hit_rank=hit_rank, 
+                            actual_duration=int(actual_duration),
+                            est_duration=int(estimated_duration),
                             tools=selected_tools
                         )
 
                     st.session_state["saved_tech"] = ""
+                    st.session_state["start_repair_timestamp"] = None
                     st.session_state["step"] = 1
-                    st.toast(f"🎉 工單已成功結案！轉移機率已動態更新。", icon="✅")
+                    st.toast(f"🎉 工單已結案！耗時: {actual_duration} 分鐘，轉移機率已動態更新。", icon="✅")
                     st.rerun()
 
 # ──────────────────────────────────────────
@@ -375,17 +407,17 @@ with tab_admin:
         st.success("🔓 管理員身分已驗證，已解鎖資料庫管理權限。")
         
         adm_subtab0, adm_subtab1, adm_subtab2, adm_subtab3 = st.tabs([
-            "📋 歷史工單監控與分析",
+            "📋 歷史工單與學術評估 (含 MTTR)",
             "📝 維修處置與 SOP 編輯", 
             "📥 待審核技師回報 (PendingFeedback)",
             "⚠️ 統計次數重置 (危險操作)"
         ])
 
         # ----------------------------------------------------
-        # 子功能 0: 歷史維修工單監控 (MaintenanceOrder)
+        # 子功能 0: 歷史維修工單監控與學術指標 (Hit@K / MRR / MTTR)
         # ----------------------------------------------------
         with adm_subtab0:
-            st.markdown("### 📋 現場維修工單總覽與即時監控")
+            st.markdown("### 📋 現場工單監控與學術評估指標 (Evaluation & MTTR)")
             
             order_query = """
             MATCH (mo:MaintenanceOrder)
@@ -398,8 +430,15 @@ with tab_admin:
                 coalesce(tech.name, mo.technician, '未記錄') AS 施工人員,
                 coalesce(mo.symptom, '未知現象') AS 故障現象,
                 coalesce(mo.actual_cause, '未知原因') AS 實際真因,
-                CASE WHEN mo.is_top1_hit = 1 THEN '🎯 Top-1 命中' ELSE '⚪ Top-K/非首位' END AS 命中狀態,
-                coalesce(mo.is_top1_hit, 0) AS hit_code,
+                coalesce(mo.hit_rank, 0) AS hit_rank,
+                coalesce(mo.actual_duration_min, 15) AS 實際耗時,
+                coalesce(mo.estimated_duration_min, 15) AS 預估耗時,
+                CASE 
+                    WHEN mo.hit_rank = 1 THEN '🎯 Top-1 命中'
+                    WHEN mo.hit_rank = 2 THEN '🥈 Top-2 命中'
+                    WHEN mo.hit_rank = 3 THEN '🥉 Top-3 命中'
+                    ELSE '⚪ 未在推薦中'
+                END AS 命中狀態,
                 tools AS 使用工具,
                 toString(mo.created_at) AS 系統登記時間
             ORDER BY mo.created_at DESC
@@ -414,24 +453,64 @@ with tab_admin:
             if not orders_data:
                 st.info("💡 目前資料庫中尚未建立任何維修工單。請先切換至技師分頁完成數筆現場診斷結案。")
             else:
-                import pandas as pd
                 df_orders = pd.DataFrame(orders_data)
                 df_orders["使用工具"] = df_orders["使用工具"].apply(lambda tools: ", ".join(tools) if tools else "通用檢修工具")
 
-                # 營運 KPI 指標
+                # 1. 核心評估指標計算 (Hit@1~3, MRR, MTTR)
                 total_orders = len(df_orders)
-                total_hits = int(df_orders["hit_code"].sum())
-                top1_accuracy = round((total_hits / total_orders) * 100, 1) if total_orders > 0 else 0.0
-                active_techs = df_orders["施工人員"].nunique()
+                h1_count = len(df_orders[df_orders["hit_rank"] == 1])
+                h2_count = len(df_orders[df_orders["hit_rank"].isin([1, 2])])
+                h3_count = len(df_orders[df_orders["hit_rank"].isin([1, 2, 3])])
 
-                col_kpi1, col_kpi2, col_kpi3, col_kpi4 = st.columns(4)
-                col_kpi1.metric("累積結案工單", f"{total_orders} 筆")
-                col_kpi2.metric("Top-1 命中率", f"{top1_accuracy} %")
-                col_kpi3.metric("出勤技師人數", f"{active_techs} 位")
-                col_kpi4.metric("最新工單日期", f"{df_orders['施工日期'].iloc[0]}")
+                hit1_rate = round((h1_count / total_orders) * 100, 1) if total_orders > 0 else 0.0
+                hit2_rate = round((h2_count / total_orders) * 100, 1) if total_orders > 0 else 0.0
+                hit3_rate = round((h3_count / total_orders) * 100, 1) if total_orders > 0 else 0.0
+
+                df_orders["rr"] = df_orders["hit_rank"].apply(lambda r: 1.0 / r if r > 0 else 0.0)
+                mrr_score = round(df_orders["rr"].mean(), 3) if total_orders > 0 else 0.0
+                
+                # MTTR 計算 (平均實際維修耗時 vs. 平均預估耗時)
+                avg_actual_time = round(df_orders["實際耗時"].mean(), 1)
+                avg_est_time = round(df_orders["預估耗時"].mean(), 1)
+                time_diff_delta = round(avg_est_time - avg_actual_time, 1)
+
+                st.markdown("##### 🎯 推薦系統評估指標矩陣 (IR Metrics & MTTR)")
+                col_m1, col_m2, col_m3, col_m4, col_m5, col_m6 = st.columns(6)
+                col_m1.metric("累積工單 (|Q|)", f"{total_orders} 筆")
+                col_m2.metric("Hit@1 (準確率)", f"{hit1_rate} %")
+                col_m3.metric("Hit@2 (涵蓋率)", f"{hit2_rate} %", delta=f"+{round(hit2_rate - hit1_rate, 1)}%")
+                col_m4.metric("Hit@3 (最大容錯)", f"{hit3_rate} %", delta=f"+{round(hit3_rate - hit2_rate, 1)}%")
+                col_m5.metric("MRR (平均倒數)", f"{mrr_score}")
+                col_m6.metric("MTTR (平均耗時)", f"{avg_actual_time} 分鐘", delta=f"{'+' if time_diff_delta > 0 else ''}{time_diff_delta} 分 (相較預估)")
 
                 st.markdown("---")
 
+                # 2. 學術演進折線圖：Hit@K 累積演進 + MTTR 耗時趨勢
+                col_chart1, col_chart2 = st.columns(2)
+                
+                with col_chart1:
+                    st.markdown("##### 📈 Hit@1 / Hit@2 / Hit@3 累積曲線")
+                    df_evolution = df_orders.sort_values(by="系統登記時間", ascending=True).reset_index(drop=True)
+                    df_evolution["工單序號"] = range(1, len(df_evolution) + 1)
+                    df_evolution["累積Hit1"] = (df_evolution["hit_rank"] == 1).cumsum()
+                    df_evolution["累積Hit2"] = (df_evolution["hit_rank"].isin([1, 2])).cumsum()
+                    df_evolution["累積Hit3"] = (df_evolution["hit_rank"].isin([1, 2, 3])).cumsum()
+
+                    df_evolution["Hit@1 (%)"] = round((df_evolution["累積Hit1"] / df_evolution["工單序號"]) * 100, 1)
+                    df_evolution["Hit@2 (%)"] = round((df_evolution["累積Hit2"] / df_evolution["工單序號"]) * 100, 1)
+                    df_evolution["Hit@3 (%)"] = round((df_evolution["累積Hit3"] / df_evolution["工單序號"]) * 100, 1)
+
+                    chart_data = df_evolution.set_index("工單序號")[["Hit@1 (%)", "Hit@2 (%)", "Hit@3 (%)"]]
+                    st.line_chart(chart_data, height=260)
+
+                with col_chart2:
+                    st.markdown("##### ⏱️ 實際耗時 vs. SOP 預估耗時 (MTTR 趨勢)")
+                    df_time_chart = df_evolution.set_index("工單序號")[["實際耗時", "預估耗時"]]
+                    st.line_chart(df_time_chart, height=260)
+
+                st.markdown("---")
+
+                # 3. 技師出勤量與常見真因圖表
                 col_ch1, col_ch2 = st.columns(2)
                 with col_ch1:
                     st.markdown("##### 👷 技師結案工單數排行")
@@ -443,15 +522,16 @@ with tab_admin:
 
                 st.markdown("---")
 
-                st.markdown("##### 📄 工單明細紀錄表")
-                display_cols = ["施工日期", "施工人員", "故障現象", "實際真因", "命中狀態", "使用工具", "系統登記時間"]
+                # 4. 工單明細紀錄表與 CSV 匯出 (包含耗時數據)
+                st.markdown("##### 📄 完整工單歷史紀錄明細")
+                display_cols = ["施工日期", "施工人員", "故障現象", "實際真因", "命中狀態", "實際耗時", "預估耗時", "hit_rank", "rr", "使用工具", "系統登記時間"]
                 st.dataframe(df_orders[display_cols], hide_index=True)
 
                 csv_data = df_orders[display_cols].to_csv(index=False).encode("utf-8-sig")
                 st.download_button(
-                    label="📥 下載完整工單紀錄 (CSV)",
+                    label="📥 下載完整學術評估工單紀錄 (含耗時數據 CSV)",
                     data=csv_data,
-                    file_name=f"telecom_orders_{datetime.date.today()}.csv",
+                    file_name=f"telecom_academic_evaluation_mttr_{datetime.date.today()}.csv",
                     mime="text/csv"
                 )
 
@@ -529,13 +609,13 @@ with tab_admin:
                 st.info("目前資料庫中尚無維修處置資料。")
 
         # ----------------------------------------------------
-        # 子功能 2: 待審核回報審核 (採用 elementId 現代語法)
+        # 子功能 2: 待審核回報審核
         # ----------------------------------------------------
         with adm_subtab2:
             st.markdown("### 📥 審核技師提交的全新處置方案")
             p_query = """
             MATCH (s:Symptom)-[:HAS_PENDING_FEEDBACK]->(fb:PendingFeedback {status: 'PENDING_REVIEW'})
-            RETURN elementId(fb) AS id, coalesce(fb.device, '未指定') AS device, coalesce(fb.sound, '未指定') AS sound, s.name AS symptom, fb.custom_cause AS cause, fb.custom_action AS action, toString(fb.created_at) AS created_at
+            RETURN elementId(fb) AS id, coalesce(fb.device, '未指定') AS device, coalesce(fb.sound, '未指定') AS sound, s.name AS symptom, fb.custom_cause AS cause, fb.custom_action AS action, coalesce(fb.actual_duration_min, 15) AS duration, toString(fb.created_at) AS created_at
             """
             with driver.session() as s:
                 pending_list = [r.data() for r in s.run(p_query)]
@@ -548,7 +628,7 @@ with tab_admin:
                     with col_info:
                         st.write(f"📱 **設備**：`{item['device']}` ｜ 🔊 **聲響**：`{item['sound']}`")
                         st.write(f"📌 **現象**：{item['symptom']}")
-                        st.write(f"💡 **新原因**：`{item['cause']}` ｜ **對策**：`{item['action']}`")
+                        st.write(f"💡 **新原因**：`{item['cause']}` ｜ **對策**：`{item['action']}` (實際耗時: {item['duration']} 分鐘)")
                         st.caption(f"時間：{item['created_at']}")
                     with col_ok:
                         if st.button("✅ 核准入庫", key=f"app_{item['id']}"):
@@ -556,7 +636,7 @@ with tab_admin:
                             MATCH (s:Symptom)-[:HAS_PENDING_FEEDBACK]->(fb:PendingFeedback) WHERE elementId(fb) = $fid
                             SET fb.status = 'APPROVED'
                             MERGE (rc:RootCause {name: fb.custom_cause})
-                            MERGE (act:Action {name: fb.custom_action, est_time_min: 20})
+                            MERGE (act:Action {name: fb.custom_action, est_time_min: toInteger(fb.actual_duration_min)})
                             MERGE (rc)-[:RESOLVED_BY]->(act)
                             MERGE (s)-[r:CAUSED_BY]->(rc)
                             ON CREATE SET r.count = 1

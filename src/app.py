@@ -127,32 +127,40 @@ with tab_user:
     st.markdown("---")
     beam_k = st.slider("Beam Search 搜尋路徑數 (Top-K)", min_value=1, max_value=3, value=2)
 
-    if st.button("🚀 開始智能診斷"):
+if st.button("🚀 開始智能診斷"):
         if not selected_symptom or "(查無" in selected_symptom:
             st.warning("請先選擇有效的具體故障現象！")
         else:
             with st.spinner("知識圖譜推論中..."):
+                # 使用 GQL 標準相容且顯式轉型的推論查詢語句
                 query = """
-                MATCH (d:DeviceType {name: $device})-[:HAS_AUDIO_STATE]->(ss:SoundStatus {name: $sound})-[:HAS_SYMPTOM]->(s:Symptom {name:$symptom})-[cb:CAUSED_BY]->(rc:RootCause)-[:RESOLVED_BY]->(act:Action)
-                ...
-                ORDER BY cb.prob DESC
-                LIMIT $k
+                MATCH (d:DeviceType {name: $device})-[:HAS_AUDIO_STATE]->(ss:SoundStatus {name: $sound})-[:HAS_SYMPTOM]->(s:Symptom {name: $symptom})-[cb:CAUSED_BY]->(rc:RootCause)-[:RESOLVED_BY]->(act:Action)
+                OPTIONAL MATCH (rc)-[:LOCATED_IN]->(comp:Component)
                 OPTIONAL MATCH (act)-[:REQUIRES]->(tool:Tool)
+                WITH rc, cb, comp, act, collect(DISTINCT tool.name) AS tools
                 RETURN
                     rc.name AS 原因,
-                    cb.prob AS 機率,
-                    comp.location AS 位置,
+                    coalesce(cb.prob, 0.0) AS 機率,
+                    coalesce(comp.location, '現場設備端') AS 位置,
                     act.name AS 維修步驟,
-                    act.est_time_min AS 耗時_分鐘,
-                    collect(tool.name) AS 所需工具
-                ORDER BY cb.prob DESC
-                LIMIT $k
+                    coalesce(act.est_time_min, 15) AS 耗時_分鐘,
+                    tools AS 所需工具
+                ORDER BY 機率 DESC
+                LIMIT toInteger($k)
                 """
                 with driver.session() as session:
                     paths = [r.data() for r in session.run(
-                        query, device=selected_device, sound=selected_sound, symptom=selected_symptom, k=beam_k
+                        query, 
+                        device=selected_device, 
+                        sound=selected_sound, 
+                        symptom=selected_symptom, 
+                        k=int(beam_k)
                     )]
 
+                st.session_state["current_paths"] = paths
+                st.session_state["symptom"] = selected_symptom
+                st.session_state["device"] = selected_device
+                st.session_state["sound"] = selected_sound
                 st.session_state["current_paths"] = paths
                 st.session_state["symptom"] = selected_symptom
                 st.session_state["device"] = selected_device

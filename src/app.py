@@ -369,18 +369,15 @@ with tab_user:
 # ──────────────────────────────────────────
 with tab_admin:
     st.subheader("🛡️ 管理員權限驗證")
-    admin_pwd = st.text_input("請輸入管理員密碼以解鎖維修資料庫編輯權限", type="password")
+    admin_pwd = st.text_input("請輸入管理員密碼...", type="password")
 
-if admin_pwd == ADMIN_PASSWORD:
-        st.success("🔓 管理員身分已驗證，已解鎖資料庫管理權限。")
-        
-        # 擴充為 4 個子分頁，工單總覽置於首位
-        adm_subtab0, adm_subtab1, adm_subtab2, adm_subtab3 = st.tabs([
-            "📋 歷史工單監控與分析",
-            "📝 維修處置與 SOP 編輯", 
-            "📥 待審核技師回報 (PendingFeedback)",
-            "⚠️ 統計次數重置 (危險操作)"
-        ])
+    if admin_pwd == ADMIN_PASSWORD:
+        # 管理員後台功能 (縮排 8 個空格)
+        ...
+    elif admin_pwd != "":
+        st.error("❌ 密碼錯誤...")
+    else:
+        st.info("🔒 此功能需要管理員權限...")
         # ----------------------------------------------------
         # 子功能 0: 歷史維修工單監控 (MaintenanceOrder)
         # ----------------------------------------------------

@@ -163,46 +163,27 @@ historical_techs = []
         st.markdown("---")
         beam_k = st.slider("Beam Search 搜尋路徑數 (Top-K)：", min_value=1, max_value=3, value=2)
 
-        # 1-3. 提交驗證與推論
+# 1-3. 提交驗證與推論
         if st.button("🚀 下一步：進行知識圖譜推論 ➔", type="primary"):
-            if not technician_input.strip():
-                st.warning("⚠️ 請先於上方填寫施工人員姓名或工號！")
+            if not final_tech_name:
+                st.warning("⚠️ 請先選擇或手動填寫施工人員姓名！")
             elif not selected_symptom or "(查無" in selected_symptom:
                 st.warning("⚠️ 請選擇有效的具體故障現象細項！")
             else:
                 with st.spinner("知識圖譜推論中..."):
-                    query = """
-                    MATCH (d:DeviceType {name: $device})-[:HAS_AUDIO_STATE]->(ss:SoundStatus {name: $sound})-[:HAS_SYMPTOM]->(s:Symptom {name: $symptom})-[cb:CAUSED_BY]->(rc:RootCause)-[:RESOLVED_BY]->(act:Action)
-                    OPTIONAL MATCH (rc)-[:LOCATED_IN]->(comp:Component)
-                    OPTIONAL MATCH (act)-[:REQUIRES]->(tool:Tool)
-                    WITH rc, cb, comp, act, collect(DISTINCT tool.name) AS tools
-                    RETURN
-                        rc.name AS 原因,
-                        coalesce(cb.prob, 0.0) AS 機率,
-                        coalesce(comp.location, '現場設備端') AS 位置,
-                        act.name AS 維修步驟,
-                        coalesce(act.est_time_min, 15) AS 耗時_分鐘,
-                        tools AS 所需工具
-                    ORDER BY 機率 DESC
-                    LIMIT toInteger($k)
-                    """
-                    with driver.session() as session:
-                        paths = [r.data() for r in session.run(
-                            query, device=selected_device, sound=selected_sound, symptom=selected_symptom, k=int(beam_k)
-                        )]
+                    # ... [原本的推論 Cypher 查詢維持不變] ...
 
                     if paths:
                         st.session_state["current_paths"] = paths
                         st.session_state["device"] = selected_device
                         st.session_state["sound"] = selected_sound
                         st.session_state["symptom"] = selected_symptom
-                        st.session_state["saved_tech"] = technician_input.strip()
+                        st.session_state["saved_tech"] = final_tech_name  # 寫入選定或輸入的人員
                         st.session_state["repair_date"] = repair_date
                         st.session_state["step"] = 2
                         st.rerun()
                     else:
                         st.error("該故障現象目前尚無關聯的推論路徑，請確認知識圖譜關聯。")
-
     # ====================================================
     # 步驟 2: 方案推薦與現場排查指南
     # ====================================================

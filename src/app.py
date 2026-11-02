@@ -51,145 +51,14 @@ tab_user, tab_admin = st.tabs(["🔧 現場診斷與回報 (一般技師)", "�
 with tab_user:
     st.subheader("現場故障診斷")
     
-    # 建立 3 欄並排版面，修復 NameError: c2 未定義問題
-    c1, c2, c3 = st.columns(3)
-    
-# ----------------------------------------------------
-    # 階層 1: 話機設備類型 (置於 c1)
-    # ----------------------------------------------------
-    with c1:
-        device_types = []
-        try:
-            with driver.session() as session:
-                # 加入 DISTINCT 確保下拉選單絕不出現重複項目
-                dt_res = session.run("MATCH (d:DeviceType) RETURN DISTINCT d.name AS name ORDER BY d.name")
-                device_types = [r["name"] for r in dt_res]
-        except Exception:
-            device_types = [
-                "類比話機 (傳統單機/POTS)", 
-                "AVAYA 數位話機 (1400/2400系列)",
-                "AVAYA IP話機 (9600/J系列)"
-            ]
-
-        selected_device = st.selectbox(
-            "【層級 1】選擇話機設備類型：",
-            device_types,
-            help="選擇話機運作架構（類比、專用數位或基於網路協定的 IP 話機）"
-        )
+    # ... 上方的欄位、診斷按鈕與推論結果展示 (皆縮排 4 或 8 格) ...
 
     # ----------------------------------------------------
-    # 階層 2: 依設備類型連動取得聲響狀態 (置於 c2)
-    # ----------------------------------------------------
-    with c2:
-        sound_status_list = []
-        try:
-            with driver.session() as session:
-                ss_res = session.run(
-                    """
-                    MATCH (d:DeviceType {name: $device})-[:HAS_AUDIO_STATE]->(ss:SoundStatus)
-                    RETURN ss.name AS name ORDER BY ss.name
-                    """,
-                    device=selected_device
-                )
-                sound_status_list = [r["name"] for r in ss_res]
-        except Exception:
-            sound_status_list = []
-
-        selected_sound = st.radio(
-            "【層級 2】聲響基本狀態", 
-            sound_status_list if sound_status_list else ["無狀態"]
-        )
-
-    # ----------------------------------------------------
-    # 階層 3: 依聲響狀態連動取得具體故障現象 (置於 c3)
-    # ----------------------------------------------------
-    with c3:
-        symptom_list = []
-        try:
-            with driver.session() as session:
-                s_res = session.run(
-                    """
-                    MATCH (d:DeviceType {name: $device})-[:HAS_AUDIO_STATE]->(ss:SoundStatus {name:$sound})-[:HAS_SYMPTOM]->(s:Symptom)
-                    RETURN s.name AS name ORDER BY s.name
-                    """,
-                    device=selected_device,
-                    sound=selected_sound
-                )
-                symptom_list = [r["name"] for r in s_res]
-        except Exception:
-            symptom_list = []
-
-        if symptom_list:
-            selected_symptom = st.selectbox("【層級 3】具體故障現象細項", symptom_list)
-        else:
-            selected_symptom = st.selectbox("【層級 3】具體故障現象細項", ["(查無對應現象)"])
-
-    st.markdown("---")
-    beam_k = st.slider("Beam Search 搜尋路徑數 (Top-K)", min_value=1, max_value=3, value=2)
-
-if st.button("🚀 開始智能診斷"):
-        if not selected_symptom or "(查無" in selected_symptom:
-            st.warning("請先選擇有效的具體故障現象！")
-        else:
-            with st.spinner("知識圖譜推論中..."):
-                # 使用 GQL 標準相容且顯式轉型的推論查詢語句
-                query = """
-                MATCH (d:DeviceType {name: $device})-[:HAS_AUDIO_STATE]->(ss:SoundStatus {name: $sound})-[:HAS_SYMPTOM]->(s:Symptom {name: $symptom})-[cb:CAUSED_BY]->(rc:RootCause)-[:RESOLVED_BY]->(act:Action)
-                OPTIONAL MATCH (rc)-[:LOCATED_IN]->(comp:Component)
-                OPTIONAL MATCH (act)-[:REQUIRES]->(tool:Tool)
-                WITH rc, cb, comp, act, collect(DISTINCT tool.name) AS tools
-                RETURN
-                    rc.name AS 原因,
-                    coalesce(cb.prob, 0.0) AS 機率,
-                    coalesce(comp.location, '現場設備端') AS 位置,
-                    act.name AS 維修步驟,
-                    coalesce(act.est_time_min, 15) AS 耗時_分鐘,
-                    tools AS 所需工具
-                ORDER BY 機率 DESC
-                LIMIT toInteger($k)
-                """
-                with driver.session() as session:
-                    paths = [r.data() for r in session.run(
-                        query, 
-                        device=selected_device, 
-                        sound=selected_sound, 
-                        symptom=selected_symptom, 
-                        k=int(beam_k)
-                    )]
-
-                st.session_state["current_paths"] = paths
-                st.session_state["symptom"] = selected_symptom
-                st.session_state["device"] = selected_device
-                st.session_state["sound"] = selected_sound
-                st.session_state["current_paths"] = paths
-                st.session_state["symptom"] = selected_symptom
-                st.session_state["device"] = selected_device
-                st.session_state["sound"] = selected_sound
-
-            if paths:
-                st.success(f"🎯 針對【{selected_device} ➔ {selected_sound}】推論完成！推薦前 {len(paths)} 項最優先排查方案：")
-                for idx, p in enumerate(paths, 1):
-                    prob_pct = round(p['機率'] * 100, 1)
-                    tools_str = ', '.join(p['所需工具']) if p['所需工具'] else '通用檢修工具'
-                    
-                    with st.container():
-                        st.markdown(f"#### 優先序 #{idx}：【{p['原因']}】 (先驗機率: `{prob_pct}%`)")
-                        col_m1, col_m2, col_m3 = st.columns(3)
-                        col_m1.metric("📍 檢查位置", p['位置'])
-                        col_m2.metric("⏱️ 預估耗時", f"{p['耗時_分鐘']} 分鐘")
-                        col_m3.metric("🔧 必備工具", tools_str)
-                        st.info(f"👉 **建議處置作為**：{p['維修步驟']}")
-                        st.markdown("---")
-            else:
-                st.warning("該故障現象目前尚無關聯的推論路徑。")
-
-    # ----------------------------------------------------
-    # 現場回報區 (已加入施工日期與工單模型演進紀錄)
+    # 現場回報區 (這裡必須精確縮排 4 個空格，與 with tab_user 內部對齊)
     # ----------------------------------------------------
     if "current_paths" in st.session_state and st.session_state["current_paths"]:
         st.subheader("🛠️ 現場維修結果反饋")
         
-        # 施工日期選擇器
         repair_date = st.date_input("📅 施工/維修日期", help="記錄本次工單完工日期，供模型學習演進曲線分析")
         
         options = [p["原因"] for p in st.session_state["current_paths"]] + ["以上皆非（提報現場新處置方案）"]

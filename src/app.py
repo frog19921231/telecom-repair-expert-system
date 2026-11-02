@@ -1,10 +1,10 @@
 ﻿import streamlit as st
 from neo4j import GraphDatabase
 
-# 1. 系統連線設定 (優先讀取 Secrets，若無則使用 AuraDB 預設參數)
-NEO4J_URI = st.secrets.get("NEO4J_URI", "neo4j+ssc://b8cec18b.databases.neo4j.io")
+# 1. 系統連線設定 (優先讀取 Secrets)
+NEO4J_URI = st.secrets.get("NEO4J_URI", "neo4j+s://b8cec18b.databases.neo4j.io")
 NEO4J_USER = st.secrets.get("NEO4J_USER", "b8cec18b")
-NEO4J_PASSWORD = st.secrets.get("NEO4J_PASSWORD", "P9wY81fDEc8bT67wCIq6Z329QOhjh-HIcyzqrqDJ_TA")
+NEO4J_PASSWORD = st.secrets.get("NEO4J_PASSWORD", "")
 ADMIN_PASSWORD = st.secrets.get("ADMIN_PASSWORD", "admin2026")
 
 @st.cache_resource
@@ -46,73 +46,84 @@ with st.sidebar:
 tab_user, tab_admin = st.tabs(["🔧 現場診斷與回報 (一般技師)", "🛡️ 管理員專用後台 (需驗證)"])
 
 # ──────────────────────────────────────────
-# 分頁 1: 現場診斷與回報 (三階選單)
+# 分頁 1: 現場診斷與回報 (三階連動選單)
 # ──────────────────────────────────────────
 with tab_user:
     st.subheader("現場故障診斷")
     
-# ----------------------------------------------------
-# 階層 1: 話機設備類型 (分立 3 類)
-# ----------------------------------------------------
-    device_types = []
-    try:
-        with driver.session() as session:
-            dt_res = session.run("MATCH (d:DeviceType) RETURN d.name AS name ORDER BY d.name")
-            device_types = [r["name"] for r in dt_res]
-    except Exception:
-        # 連線例外時的回退預設選單
-        device_types = [
-            "類比話機 (傳統單機/POTS)", 
-            "AVAYA 數位話機 (1400/2400系列)",
-            "AVAYA IP話機 (9600/J系列)"
-        ]
+    # 建立 3 欄並排版面，修復 NameError: c2 未定義問題
+    c1, c2, c3 = st.columns(3)
+    
+    # ----------------------------------------------------
+    # 階層 1: 話機設備類型 (置於 c1)
+    # ----------------------------------------------------
+    with c1:
+        device_types = []
+        try:
+            with driver.session() as session:
+                dt_res = session.run("MATCH (d:DeviceType) RETURN d.name AS name ORDER BY d.name")
+                device_types = [r["name"] for r in dt_res]
+        except Exception:
+            device_types = [
+                "類比話機 (傳統單機/POTS)", 
+                "AVAYA 數位話機 (1400/2400系列)",
+                "AVAYA IP話機 (9600/J系列)"
+            ]
 
-    selected_device = st.selectbox(
-        "【層級 1】選擇話機設備類型：",
-        device_types,
-        help="選擇話機運作架構（類比、專用數位或基於網路協定的 IP 話機）"
-    )
+        selected_device = st.selectbox(
+            "【層級 1】選擇話機設備類型：",
+            device_types,
+            help="選擇話機運作架構（類比、專用數位或基於網路協定的 IP 話機）"
+        )
 
-    # 2. 依設備類型連動取得聲響狀態 (第二層)
-    sound_status_list = []
-    try:
-        with driver.session() as session:
-            ss_res = session.run(
-                """
-                MATCH (d:DeviceType {name: $device})-[:HAS_AUDIO_STATE]->(ss:SoundStatus)
-                RETURN ss.name AS name ORDER BY ss.name
-                """,
-                device=selected_device
-            )
-            sound_status_list = [r["name"] for r in ss_res]
-    except Exception:
-        sound_status_list = []
-
+    # ----------------------------------------------------
+    # 階層 2: 依設備類型連動取得聲響狀態 (置於 c2)
+    # ----------------------------------------------------
     with c2:
-        selected_sound = st.radio("【層級 2】聲響基本狀態", sound_status_list if sound_status_list else ["無狀態"])
+        sound_status_list = []
+        try:
+            with driver.session() as session:
+                ss_res = session.run(
+                    """
+                    MATCH (d:DeviceType {name: $device})-[:HAS_AUDIO_STATE]->(ss:SoundStatus)
+                    RETURN ss.name AS name ORDER BY ss.name
+                    """,
+                    device=selected_device
+                )
+                sound_status_list = [r["name"] for r in ss_res]
+        except Exception:
+            sound_status_list = []
 
-    # 3. 依聲響狀態連動取得具體故障現象 (第三層)
-    symptom_list = []
-    try:
-        with driver.session() as session:
-            s_res = session.run(
-                """
-                MATCH (d:DeviceType {name: $device})-[:HAS_AUDIO_STATE]->(ss:SoundStatus {name:$sound})-[:HAS_SYMPTOM]->(s:Symptom)
-                RETURN s.name AS name ORDER BY s.name
-                """,
-                device=selected_device,
-                sound=selected_sound
-            )
-            symptom_list = [r["name"] for r in s_res]
-    except Exception:
-        symptom_list = []
+        selected_sound = st.radio(
+            "【層級 2】聲響基本狀態", 
+            sound_status_list if sound_status_list else ["無狀態"]
+        )
 
+    # ----------------------------------------------------
+    # 階層 3: 依聲響狀態連動取得具體故障現象 (置於 c3)
+    # ----------------------------------------------------
     with c3:
+        symptom_list = []
+        try:
+            with driver.session() as session:
+                s_res = session.run(
+                    """
+                    MATCH (d:DeviceType {name: $device})-[:HAS_AUDIO_STATE]->(ss:SoundStatus {name:$sound})-[:HAS_SYMPTOM]->(s:Symptom)
+                    RETURN s.name AS name ORDER BY s.name
+                    """,
+                    device=selected_device,
+                    sound=selected_sound
+                )
+                symptom_list = [r["name"] for r in s_res]
+        except Exception:
+            symptom_list = []
+
         if symptom_list:
             selected_symptom = st.selectbox("【層級 3】具體故障現象細項", symptom_list)
         else:
             selected_symptom = st.selectbox("【層級 3】具體故障現象細項", ["(查無對應現象)"])
 
+    st.markdown("---")
     beam_k = st.slider("Beam Search 搜尋路徑數 (Top-K)", min_value=1, max_value=3, value=2)
 
     if st.button("🚀 開始智能診斷"):
@@ -161,9 +172,15 @@ with tab_user:
             else:
                 st.warning("該故障現象目前尚無關聯的推論路徑。")
 
-    # 現場回報區
+    # ----------------------------------------------------
+    # 現場回報區 (已加入施工日期與工單模型演進紀錄)
+    # ----------------------------------------------------
     if "current_paths" in st.session_state and st.session_state["current_paths"]:
         st.subheader("🛠️ 現場維修結果反饋")
+        
+        # 施工日期選擇器
+        repair_date = st.date_input("📅 施工/維修日期", help="記錄本次工單完工日期，供模型學習演進曲線分析")
+        
         options = [p["原因"] for p in st.session_state["current_paths"]] + ["以上皆非（提報現場新處置方案）"]
         chosen = st.radio("請勾選實際解決問題的原因：", options)
 
@@ -180,20 +197,32 @@ with tab_user:
                         symptom: $symptom,
                         custom_cause: $cause,
                         custom_action: $action,
+                        repair_date: toString($repair_date),
                         created_at: datetime(),
                         status: 'PENDING_REVIEW'
                     })
                     CREATE (s)-[:HAS_PENDING_FEEDBACK]->(fb)
                     """
                     with driver.session() as s:
-                        s.run(c_query, device=st.session_state["device"], sound=st.session_state["sound"], symptom=st.session_state["symptom"], cause=new_cause, action=new_action)
-                    st.success("已送出新方案至待審核暫存庫，請等待管理員核准！")
+                        s.run(c_query, device=st.session_state["device"], sound=st.session_state["sound"], symptom=st.session_state["symptom"], cause=new_cause, action=new_action, repair_date=repair_date)
+                    st.success(f"已記錄施工日期（{repair_date}）並送出新方案至待審核暫存庫！")
                 else:
                     st.warning("請填寫完整原因與處置對策。")
         else:
             if st.button("✅ 確認回報並更新機率"):
+                top1_cause = st.session_state["current_paths"][0]["原因"] if st.session_state["current_paths"] else ""
+                is_hit_top1 = 1 if chosen == top1_cause else 0
+
                 u_query = """
                 MATCH (s:Symptom {name: $symptom})-[target:CAUSED_BY]->(rc:RootCause {name:$cause})
+                CREATE (mo:MaintenanceOrder {
+                    repair_date: toString($repair_date),
+                    symptom: $symptom,
+                    actual_cause: $cause,
+                    is_top1_hit: $is_hit_top1,
+                    created_at: datetime()
+                })
+                CREATE (s)-[:LOGGED_IN]->(mo)
                 SET target.count = coalesce(target.count, 0) + 1
                 WITH s
                 MATCH (s)-[all_rel:CAUSED_BY]->(:RootCause)
@@ -202,8 +231,8 @@ with tab_user:
                 SET r.prob = round((toFloat(r.count) / toFloat(total)) * 10000.0) / 10000.0
                 """
                 with driver.session() as s:
-                    s.run(u_query, symptom=st.session_state["symptom"], cause=chosen)
-                st.success(f"已記錄！原因「{chosen}」次數增加，機率已重新動態平衡。")
+                    s.run(u_query, symptom=st.session_state["symptom"], cause=chosen, repair_date=repair_date, is_hit_top1=is_hit_top1)
+                st.success(f"已記錄工單（{repair_date}）！原因「{chosen}」次數增加，馬可夫轉移機率已動態重新平衡。")
 
 # ──────────────────────────────────────────
 # 分頁 2: 管理員專屬後台 (需驗證權限)
@@ -216,13 +245,13 @@ with tab_admin:
         st.success("🔓 管理員身分已驗證，已解鎖資料庫管理權限。")
         
         adm_subtab1, adm_subtab2, adm_subtab3 = st.tabs([
-    "📝 維修處置與 SOP 編輯", 
-    "📥 待審核技師回報 (PendingFeedback)",
-    "⚠️ 統計次數重置 (危險操作)"
-])
+            "📝 維修處置與 SOP 編輯", 
+            "📥 待審核技師回報 (PendingFeedback)",
+            "⚠️ 統計次數重置 (危險操作)"
+        ])
 
         # ----------------------------------------------------
-        # 子功能 1: 視覺化維修方法編輯管理 (管理員專屬)
+        # 子功能 1: 視覺化維修方法編輯管理
         # ----------------------------------------------------
         with adm_subtab1:
             st.markdown("### 🛠️ 編輯現有維修處置 (Action)")
@@ -272,9 +301,7 @@ with tab_admin:
                         s.run(update_cypher, old_name=current_act["action_name"], new_name=new_action_text, new_time=new_time, tools=tools_list)
                     st.success(f"✅ 維修處置「{new_action_text}」已成功更新！")
                     st.rerun()
-                    # ----------------------------------------------------
-                # 刪除維修處置功能 (管理員專屬，附帶防誤觸機制)
-                # ----------------------------------------------------
+
                 st.markdown("---")
                 st.markdown("#### 🗑️ 刪除此項維修處置")
                 st.caption("注意：刪除後將移除該 Action 節點及其與工具、故障原因的關聯。")
@@ -346,8 +373,9 @@ with tab_admin:
                             st.warning("已駁回。")
                             st.rerun()
                     st.markdown("---")
-                    # ----------------------------------------------------
-        # 子功能 3: 統計次數重置與機率歸零 (雙重防誤觸)
+
+        # ----------------------------------------------------
+        # 子功能 3: 統計次數重置與機率歸零
         # ----------------------------------------------------
         with adm_subtab3:
             st.markdown("### ⚠️ 故障原因統計計數歸零與機率重置")

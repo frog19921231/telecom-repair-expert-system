@@ -50,20 +50,28 @@ tab_user, tab_admin = st.tabs(["🔧 現場診斷與回報 (一般技師)", "�
 # ──────────────────────────────────────────
 with tab_user:
     st.subheader("現場故障診斷")
-
-    # 1. 取得設備類型 (第一層)
+    
+# ----------------------------------------------------
+# 階層 1: 話機設備類型 (分立 3 類)
+# ----------------------------------------------------
     device_types = []
     try:
         with driver.session() as session:
             dt_res = session.run("MATCH (d:DeviceType) RETURN d.name AS name ORDER BY d.name")
             device_types = [r["name"] for r in dt_res]
     except Exception:
-        device_types = ["類比話機 (傳統單機/POTS)", "AVAYA 數位/IP 專用話機 (1400/9600 系列)"]
+        # 連線例外時的回退預設選單
+        device_types = [
+            "類比話機 (傳統單機/POTS)", 
+            "AVAYA 數位話機 (1400/2400系列)",
+            "AVAYA IP話機 (9600/J系列)"
+        ]
 
-    c1, c2, c3 = st.columns(3)
-    
-    with c1:
-        selected_device = st.radio("【層級 1】話機設備類型", device_types)
+    selected_device = st.selectbox(
+        "【層級 1】選擇話機設備類型：",
+        device_types,
+        help="選擇話機運作架構（類比、專用數位或基於網路協定的 IP 話機）"
+    )
 
     # 2. 依設備類型連動取得聲響狀態 (第二層)
     sound_status_list = []

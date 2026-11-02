@@ -71,15 +71,44 @@ with tab_user:
         st.subheader("【步驟 1】登錄維修人員並選擇具體故障現象")
 
         # 1-1. 前置施工人員與施工日期
+historical_techs = []
+        try:
+            with driver.session() as session:
+                tech_res = session.run("MATCH (t:Technician) RETURN DISTINCT t.name AS name ORDER BY t.name")
+                historical_techs = [r["name"] for r in tech_res if r["name"]]
+        except Exception:
+            historical_techs = []
+
+        tech_options = historical_techs + ["➕ 手動輸入新施工人員"]
+
         col_tech, col_date = st.columns([2, 1])
         with col_tech:
-            technician_input = st.text_input(
-                "👷 施工人員：",
-                value=st.session_state.get("saved_tech", ""),
-                placeholder="請輸入技師姓名或員編 (例: 王小明 / T1082)",
-                key="step1_tech_input",
-                help="必填欄位，確立本張工單責任歸屬"
+            # 若先前已有暫存值且在名單內，預設選取；否則預設為第一項
+            default_tech_idx = 0
+            saved_tech_val = st.session_state.get("saved_tech", "")
+            if saved_tech_val in historical_techs:
+                default_tech_idx = historical_techs.index(saved_tech_val)
+            elif not historical_techs:
+                default_tech_idx = 0
+
+            selected_tech_choice = st.selectbox(
+                "👷 選擇施工人員：",
+                options=tech_options,
+                index=default_tech_idx,
+                help="可直接挑選歷史施工人員，或選取最下方自行手動輸入新人員"
             )
+
+            # 若選擇自行輸入（或目前資料庫尚無任何技師資料）
+            if selected_tech_choice == "➕ 手動輸入新施工人員":
+                custom_tech_name = st.text_input(
+                    "請填寫新施工人員姓名或工號：",
+                    value="" if saved_tech_val in historical_techs else saved_tech_val,
+                    placeholder="例如: 王小明 / T1082"
+                )
+                final_tech_name = custom_tech_name.strip()
+            else:
+                final_tech_name = selected_tech_choice
+
         with col_date:
             repair_date = st.date_input(
                 "📅 施工/維修日期", 

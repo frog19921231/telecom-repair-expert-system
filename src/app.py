@@ -212,7 +212,7 @@ with tab_user:
                 with col_hint:
                     st.caption("點擊後自動記錄工單、回填必備工具並即時累進演算法機率。")
 
-                if btn_resolve:
+if btn_resolve:
                     if not st.session_state["saved_tech"]:
                         st.warning("⚠️ 請先於上方填寫施工人員姓名後再點擊結案！")
                     else:
@@ -254,10 +254,17 @@ with tab_user:
                                 is_hit_top1=is_hit_top1,
                                 tools=tools_to_log
                             )
-                        st.success(f"🎉 工單已成功自動建檔！【{p['原因']}】次數 +1，模型機率已即時動態更新！")
+                        
+                        # ---------------------------------------------
+                        # 👇 加入這裡：鎖定工單並清空施工人員輸入框
+                        # ---------------------------------------------
+                        st.session_state["is_resolved"] = True
+                        st.session_state["resolved_cause"] = p['原因']
+                        st.session_state["saved_tech"] = ""
+                        st.session_state["current_tech_input"] = ""
+                        
+                        st.toast(f"🎉 工單已成功結案！施工人員欄位已自動清空。", icon="✅")
                         st.rerun()
-
-                st.markdown("---")
 
         # 方案皆非時的備用提報折疊區 (Expander)
         with st.expander("❓ 以上推薦皆非實際原因？（提報現場全新處置方案）"):

@@ -371,15 +371,96 @@ with tab_admin:
     st.subheader("🛡️ 管理員權限驗證")
     admin_pwd = st.text_input("請輸入管理員密碼以解鎖維修資料庫編輯權限", type="password")
 
-    if admin_pwd == ADMIN_PASSWORD:
+if admin_pwd == ADMIN_PASSWORD:
         st.success("🔓 管理員身分已驗證，已解鎖資料庫管理權限。")
         
-        adm_subtab1, adm_subtab2, adm_subtab3 = st.tabs([
+        # 擴充為 4 個子分頁，工單總覽置於首位
+        adm_subtab0, adm_subtab1, adm_subtab2, adm_subtab3 = st.tabs([
+            "📋 歷史工單監控與分析",
             "📝 維修處置與 SOP 編輯", 
             "📥 待審核技師回報 (PendingFeedback)",
             "⚠️ 統計次數重置 (危險操作)"
         ])
+        # ----------------------------------------------------
+        # 子功能 0: 歷史維修工單監控 (MaintenanceOrder)
+        # ----------------------------------------------------
+        with adm_subtab0:
+            st.markdown("### 📋 現場維修工單總覽與即時監控")
+            
+            # 查詢所有 MaintenanceOrder 及其關聯的 Technician 與 Tool
+            order_query = """
+            MATCH (mo:MaintenanceOrder)
+            OPTIONAL MATCH (tech:Technician)-[:HANDLED]->(mo)
+            OPTIONAL MATCH (mo)-[:USED_TOOL]->(t:Tool)
+            RETURN 
+                elementId(mo) AS order_id,
+                coalesce(mo.repair_date, '未填') AS 施工日期,
+                coalesce(tech.name, mo.technician, '未記錄') AS 施工人員,
+                coalesce(mo.symptom, '未知現象') AS 故障現象,
+                coalesce(mo.actual_cause, '未知原因') AS 實際真因,
+                CASE WHEN mo.is_top1_hit = 1 THEN '🎯 Top-1 命中' ELSE '⚪ Top-K/非首位' END AS 命中狀態,
+                mo.is_top1_hit AS hit_code,
+                collect(DISTINCT t.name) AS 使用工具,
+                toString(mo.created_at) AS 系統登記時間
+            ORDER BY mo.created_at DESC
+            """
+            try:
+                with driver.session() as s:
+                    orders_data = [r.data() for r in s.run(order_query)]
+            except Exception as e:
+                orders_data = []
+                st.error(f"讀取工單資料失敗: {e}")
 
+            if not orders_data:
+                st.info("💡 目前資料庫中尚未建立任何維修工單。請先切換至技師分頁完成數筆現場診斷結案。")
+            else:
+                import pandas as pd
+                df_orders = pd.DataFrame(orders_data)
+                
+                # 工具列表轉為字串以利顯示
+                df_orders["使用工具"] = df_orders["使用工具"].apply(lambda tools: ", ".join(tools) if tools else "通用檢修工具")
+
+                # 1. 頂部營運 KPI 指標看板
+                total_orders = len(df_orders)
+                total_hits = df_orders["hit_code"].sum()
+                top1_accuracy = round((total_hits / total_orders) * 100, 1) if total_orders > 0 else 0.0
+                active_techs = df_orders["施工人員"].nunique()
+
+                col_kpi1, col_kpi2, col_kpi3, col_kpi4 = st.columns(4)
+                col_kpi1.metric("累積結案工單", f"{total_orders} 筆")
+                col_kpi2.metric("Top-1 命中率", f"{top1_accuracy} %")
+                col_kpi3.metric("出勤技師人數", f"{active_techs} 位")
+                col_kpi4.metric("最新工單日期", f"{df_orders['施工日期'].iloc[0]}")
+
+                st.markdown("---")
+
+                # 2. 技師出勤量與真因分佈圖表
+                col_ch1, col_ch2 = st.columns(2)
+                with col_ch1:
+                    st.markdown("##### 👷 技師結案工單數排行")
+                    tech_counts = df_orders["施工人員"].value_counts()
+                    st.bar_chart(tech_counts)
+
+                with col_ch2:
+                    st.markdown("##### 🛠️ 常見故障真因 Top-5")
+                    cause_counts = df_orders["實際真因"].value_counts().head(5)
+                    st.bar_chart(cause_counts)
+
+                st.markdown("---")
+
+                # 3. 完整工單表格清單
+                st.markdown("##### 📄 工單明細紀錄表")
+                display_cols = ["施工日期", "施工人員", "故障現象", "實際真因", "命中狀態", "使用工具", "系統登記時間"]
+                st.dataframe(df_orders[display_cols], use_container_width=True, hide_index=True)
+
+                # 4. 匯出 CSV 按鈕
+                csv_data = df_orders[display_cols].to_csv(index=False).encode("utf-8-sig")
+                st.download_button(
+                    label="📥 下載完整工單紀錄 (CSV)",
+                    data=csv_data,
+                    file_name=f"telecom_maintenance_orders_{datetime.date.today()}.csv",
+                    mime="text/csv"
+                )
         # ----------------------------------------------------
         # 子功能 1: 視覺化維修方法編輯管理
         # ----------------------------------------------------

@@ -64,14 +64,14 @@ with tab_user:
     st.caption(f"📍 目前進度：步驟 {st.session_state['step']} / 3 —— **{steps_label[st.session_state['step'] - 1]}**")
     st.markdown("---")
 
-    # ====================================================
+# ====================================================
     # 步驟 1: 施工人員、日期登錄與話機現象選擇
     # ====================================================
     if st.session_state["step"] == 1:
         st.subheader("【步驟 1】登錄維修人員並選擇具體故障現象")
 
-        # 1-1. 前置施工人員與施工日期
-historical_techs = []
+        # 1-1. 動態讀取歷史技師名單並提供下拉/手動雙軌輸入
+        historical_techs = []
         try:
             with driver.session() as session:
                 tech_res = session.run("MATCH (t:Technician) RETURN DISTINCT t.name AS name ORDER BY t.name")
@@ -83,7 +83,6 @@ historical_techs = []
 
         col_tech, col_date = st.columns([2, 1])
         with col_tech:
-            # 若先前已有暫存值且在名單內，預設選取；否則預設為第一項
             default_tech_idx = 0
             saved_tech_val = st.session_state.get("saved_tech", "")
             if saved_tech_val in historical_techs:
@@ -98,7 +97,6 @@ historical_techs = []
                 help="可直接挑選歷史施工人員，或選取最下方自行手動輸入新人員"
             )
 
-            # 若選擇自行輸入（或目前資料庫尚無任何技師資料）
             if selected_tech_choice == "➕ 手動輸入新施工人員":
                 custom_tech_name = st.text_input(
                     "請填寫新施工人員姓名或工號：",

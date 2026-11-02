@@ -404,23 +404,17 @@ with tab_admin:
 
                     col_confirm, col_cancel = st.columns([1, 4])
                     
-                    with col_confirm:
+with col_confirm:
                         if st.button("🔥 確認永久歸零", type="primary", disabled=not safety_checkbox):
                             reset_cypher = """
-                            MATCH (s:Symptom)-[r:CAUSED_BY]->(rc:RootCause)
-                            SET r.count = 1
-                            WITH s
-                            MATCH (s)-[all_rel:CAUSED_BY]->(:RootCause)
-                            WITH s, sum(all_rel.count) AS total, collect(all_rel) AS list
-                            UNWIND list AS r
-                            SET r.prob = round((toFloat(r.count) / toFloat(total)) * 10000.0) / 10000.0
+                            ...
                             """
                             with driver.session() as s:
                                 s.run(reset_cypher)
 
                             st.session_state["confirm_reset_stage"] = False
                             st.success("✅ 統計計數已成功全數歸零，先驗機率已重新均勻化！")
-                            st.rerun()
+                                st.rerun()  # ❌ 這裡縮排比上一行多了 4 格，導致 unexpected indent
 
                     with col_cancel:
                         if st.button("↩️ 取消操作"):

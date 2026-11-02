@@ -54,14 +54,15 @@ with tab_user:
     # 建立 3 欄並排版面，修復 NameError: c2 未定義問題
     c1, c2, c3 = st.columns(3)
     
-    # ----------------------------------------------------
+# ----------------------------------------------------
     # 階層 1: 話機設備類型 (置於 c1)
     # ----------------------------------------------------
     with c1:
         device_types = []
         try:
             with driver.session() as session:
-                dt_res = session.run("MATCH (d:DeviceType) RETURN d.name AS name ORDER BY d.name")
+                # 加入 DISTINCT 確保下拉選單絕不出現重複項目
+                dt_res = session.run("MATCH (d:DeviceType) RETURN DISTINCT d.name AS name ORDER BY d.name")
                 device_types = [r["name"] for r in dt_res]
         except Exception:
             device_types = [

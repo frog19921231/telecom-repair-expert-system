@@ -51,10 +51,137 @@ tab_user, tab_admin = st.tabs(["🔧 現場診斷與回報 (一般技師)", "�
 with tab_user:
     st.subheader("現場故障診斷")
     
-    # ... 上方的欄位、診斷按鈕與推論結果展示 (皆縮排 4 或 8 格) ...
+    # 三欄並排排版
+    c1, c2, c3 = st.columns(3)
+    
+    # ----------------------------------------------------
+    # 階層 1: 話機設備類型 (置於 c1)
+    # ----------------------------------------------------
+    with c1:
+        device_types = []
+        try:
+            with driver.session() as session:
+                dt_res = session.run("MATCH (d:DeviceType) RETURN DISTINCT d.name AS name ORDER BY d.name")
+                device_types = [r["name"] for r in dt_res]
+        except Exception:
+            device_types = [
+                "類比話機 (傳統單機/POTS)", 
+                "AVAYA 數位話機 (1400/2400系列)",
+                "AVAYA IP話機 (9600/J系列)"
+            ]
+
+        selected_device = st.selectbox(
+            "【層級 1】選擇話機設備類型：",
+            device_types,
+            help="選擇話機運作架構（類比、專用數位或基於網路協定的 IP 話機）"
+        )
 
     # ----------------------------------------------------
-    # 現場回報區 (這裡必須精確縮排 4 個空格，與 with tab_user 內部對齊)
+    # 階層 2: 依設備類型連動取得聲響狀態 (置於 c2)
+    # ----------------------------------------------------
+    with c2:
+        sound_status_list = []
+        try:
+            with driver.session() as session:
+                ss_res = session.run(
+                    """
+                    MATCH (d:DeviceType {name: $device})-[:HAS_AUDIO_STATE]->(ss:SoundStatus)
+                    RETURN DISTINCT ss.name AS name ORDER BY ss.name
+                    """,
+                    device=selected_device
+                )
+                sound_status_list = [r["name"] for r in ss_res]
+        except Exception:
+            sound_status_list = []
+
+        selected_sound = st.radio(
+            "【層級 2】聲響基本狀態", 
+            sound_status_list if sound_status_list else ["無狀態"]
+        )
+
+    # ----------------------------------------------------
+    # 階層 3: 依聲響狀態連動取得具體故障現象 (置於 c3)
+    # ----------------------------------------------------
+    with c3:
+        symptom_list = []
+        try:
+            with driver.session() as session:
+                s_res = session.run(
+                    """
+                    MATCH (d:DeviceType {name: $device})-[:HAS_AUDIO_STATE]->(ss:SoundStatus {name:$sound})-[:HAS_SYMPTOM]->(s:Symptom)
+                    RETURN DISTINCT s.name AS name ORDER BY s.name
+                    """,
+                    device=selected_device,
+                    sound=selected_sound
+                )
+                symptom_list = [r["name"] for r in s_res]
+        except Exception:
+            symptom_list = []
+
+        if symptom_list:
+            selected_symptom = st.selectbox("【層級 3】具體故障現象細項", symptom_list)
+        else:
+            selected_symptom = st.selectbox("【層級 3】具體故障現象細項", ["(查無對應現象)"])
+
+    st.markdown("---")
+    beam_k = st.slider("Beam Search 搜尋路徑數 (Top-K)", min_value=1, max_value=3, value=2)
+
+    # ----------------------------------------------------
+    # 智能推論引擎 (GQL 嚴格語法相容)
+    # ----------------------------------------------------
+    if st.button("🚀 開始智能診斷"):
+        if not selected_symptom or "(查無" in selected_symptom:
+            st.warning("請先選擇有效的具體故障現象！")
+        else:
+            with st.spinner("知識圖譜推論中..."):
+                query = """
+                MATCH (d:DeviceType {name: $device})-[:HAS_AUDIO_STATE]->(ss:SoundStatus {name: $sound})-[:HAS_SYMPTOM]->(s:Symptom {name: $symptom})-[cb:CAUSED_BY]->(rc:RootCause)-[:RESOLVED_BY]->(act:Action)
+                OPTIONAL MATCH (rc)-[:LOCATED_IN]->(comp:Component)
+                OPTIONAL MATCH (act)-[:REQUIRES]->(tool:Tool)
+                WITH rc, cb, comp, act, collect(DISTINCT tool.name) AS tools
+                RETURN
+                    rc.name AS 原因,
+                    coalesce(cb.prob, 0.0) AS 機率,
+                    coalesce(comp.location, '現場設備端') AS 位置,
+                    act.name AS 維修步驟,
+                    coalesce(act.est_time_min, 15) AS 耗時_分鐘,
+                    tools AS 所需工具
+                ORDER BY 機率 DESC
+                LIMIT toInteger($k)
+                """
+                with driver.session() as session:
+                    paths = [r.data() for r in session.run(
+                        query, 
+                        device=selected_device, 
+                        sound=selected_sound, 
+                        symptom=selected_symptom, 
+                        k=int(beam_k)
+                    )]
+
+                st.session_state["current_paths"] = paths
+                st.session_state["symptom"] = selected_symptom
+                st.session_state["device"] = selected_device
+                st.session_state["sound"] = selected_sound
+
+            if paths:
+                st.success(f"🎯 針對【{selected_device} ➔ {selected_sound}】推論完成！推薦前 {len(paths)} 項最優先排查方案：")
+                for idx, p in enumerate(paths, 1):
+                    prob_pct = round(p['機率'] * 100, 1)
+                    tools_str = ', '.join(p['所需工具']) if p['所需工具'] else '通用檢修工具'
+                    
+                    with st.container():
+                        st.markdown(f"#### 優先序 #{idx}：【{p['原因']}】 (先驗機率: `{prob_pct}%`)")
+                        col_m1, col_m2, col_m3 = st.columns(3)
+                        col_m1.metric("📍 檢查位置", p['位置'])
+                        col_m2.metric("⏱️ 預估耗時", f"{p['耗時_分鐘']} 分鐘")
+                        col_m3.metric("🔧 必備工具", tools_str)
+                        st.info(f"👉 **建議處置作為**：{p['維修步驟']}")
+                        st.markdown("---")
+            else:
+                st.warning("該故障現象目前尚無關聯的推論路徑。")
+
+    # ----------------------------------------------------
+    # 現場回報區 (結合工單日期與模型線上演進)
     # ----------------------------------------------------
     if "current_paths" in st.session_state and st.session_state["current_paths"]:
         st.subheader("🛠️ 現場維修結果反饋")
@@ -94,7 +221,7 @@ with tab_user:
                 is_hit_top1 = 1 if chosen == top1_cause else 0
 
                 u_query = """
-                MATCH (s:Symptom {name: $symptom})-[target:CAUSED_BY]->(rc:RootCause {name:$cause})
+                MATCH (s:Symptom {name: $symptom})-[target:CAUSED_BY]->(rc:RootCause {name: $cause})
                 CREATE (mo:MaintenanceOrder {
                     repair_date: toString($repair_date),
                     symptom: $symptom,
@@ -139,7 +266,7 @@ with tab_admin:
             act_query = """
             MATCH (d:DeviceType)-[:HAS_AUDIO_STATE]->(ss:SoundStatus)-[:HAS_SYMPTOM]->(s:Symptom)-[:CAUSED_BY]->(rc:RootCause)-[:RESOLVED_BY]->(act:Action)
             OPTIONAL MATCH (act)-[:REQUIRES]->(t:Tool)
-            RETURN act.name AS action_name, act.est_time_min AS time_min, rc.name AS root_cause, d.name AS device, ss.name AS sound, collect(t.name) AS tools
+            RETURN act.name AS action_name, act.est_time_min AS time_min, rc.name AS root_cause, d.name AS device, ss.name AS sound, collect(DISTINCT t.name) AS tools
             ORDER BY d.name, act.name
             """
             with driver.session() as s:
@@ -204,13 +331,13 @@ with tab_admin:
                 st.info("目前資料庫中尚無維修處置資料。")
 
         # ----------------------------------------------------
-        # 子功能 2: 待審核回報審核
+        # 子功能 2: 待審核回報審核 (採用 elementId 現代語法)
         # ----------------------------------------------------
         with adm_subtab2:
             st.markdown("### 📥 審核技師提交的全新處置方案")
             p_query = """
             MATCH (s:Symptom)-[:HAS_PENDING_FEEDBACK]->(fb:PendingFeedback {status: 'PENDING_REVIEW'})
-            RETURN id(fb) AS id, coalesce(fb.device, '未指定') AS device, coalesce(fb.sound, '未指定') AS sound, s.name AS symptom, fb.custom_cause AS cause, fb.custom_action AS action, toString(fb.created_at) AS created_at
+            RETURN elementId(fb) AS id, coalesce(fb.device, '未指定') AS device, coalesce(fb.sound, '未指定') AS sound, s.name AS symptom, fb.custom_cause AS cause, fb.custom_action AS action, toString(fb.created_at) AS created_at
             """
             with driver.session() as s:
                 pending_list = [r.data() for r in s.run(p_query)]
@@ -228,7 +355,7 @@ with tab_admin:
                     with col_ok:
                         if st.button("✅ 核准入庫", key=f"app_{item['id']}"):
                             approve_cypher = """
-                            MATCH (s:Symptom)-[:HAS_PENDING_FEEDBACK]->(fb:PendingFeedback) WHERE id(fb) = $fid
+                            MATCH (s:Symptom)-[:HAS_PENDING_FEEDBACK]->(fb:PendingFeedback) WHERE elementId(fb) = $fid
                             SET fb.status = 'APPROVED'
                             MERGE (rc:RootCause {name: fb.custom_cause})
                             MERGE (act:Action {name: fb.custom_action, est_time_min: 20})
@@ -245,6 +372,65 @@ with tab_admin:
                             with driver.session() as s:
                                 s.run(approve_cypher, fid=item['id'])
                             st.success("已核准！正式建立節點並重平衡機率。")
+                            st.rerun()
+                    with col_no:
+                        if st.button("❌ 駁回", key=f"rej_{item['id']}"):
+                            with driver.session() as s:
+                                s.run("MATCH (fb:PendingFeedback) WHERE elementId(fb) = $fid SET fb.status = 'REJECTED'", fid=item['id'])
+                            st.warning("已駁回。")
+                            st.rerun()
+                    st.markdown("---")
+
+        # ----------------------------------------------------
+        # 子功能 3: 統計次數重置與機率歸零
+        # ----------------------------------------------------
+        with adm_subtab3:
+            st.markdown("### ⚠️ 故障原因統計計數歸零與機率重置")
+            st.caption("此操作將清空所有現場技師累積回報的維修次數，並將所有故障原因之先驗機率重置為基準均勻分佈。")
+
+            if "confirm_reset_stage" not in st.session_state:
+                st.session_state["confirm_reset_stage"] = False
+
+            if not st.session_state["confirm_reset_stage"]:
+                if st.button("🚨 申請重置所有統計數據", type="secondary"):
+                    st.session_state["confirm_reset_stage"] = True
+                    st.rerun()
+            else:
+                with st.container():
+                    st.error("🚨 **危險操作警告！**")
+                    st.write("您即將執行統計數據永久清空。請注意：此操作無法復原，所有已記錄的排查權重將回到初始狀態。")
+
+                    safety_checkbox = st.checkbox("我已充分理解此操作之後果，並確定要將所有統計計數歸零。")
+
+                    col_confirm, col_cancel = st.columns([1, 4])
+                    
+                    with col_confirm:
+                        if st.button("🔥 確認永久歸零", type="primary", disabled=not safety_checkbox):
+                            reset_cypher = """
+                            MATCH (s:Symptom)-[r:CAUSED_BY]->(rc:RootCause)
+                            SET r.count = 1
+                            WITH s
+                            MATCH (s)-[all_rel:CAUSED_BY]->(:RootCause)
+                            WITH s, sum(all_rel.count) AS total, collect(all_rel) AS list
+                            UNWIND list AS r
+                            SET r.prob = round((toFloat(r.count) / toFloat(total)) * 10000.0) / 10000.0
+                            """
+                            with driver.session() as s:
+                                s.run(reset_cypher)
+
+                            st.session_state["confirm_reset_stage"] = False
+                            st.success("✅ 統計計數已成功全數歸零，先驗機率已重新均勻化！")
+                            st.rerun()
+
+                    with col_cancel:
+                        if st.button("↩️ 取消操作"):
+                            st.session_state["confirm_reset_stage"] = False
+                            st.rerun()
+
+    elif admin_pwd != "":
+        st.error("❌ 密碼錯誤，拒絕存取維修管理功能。")
+    else:
+        st.info("🔒 此功能需要管理員權限，請先於上方輸入密碼。")
                             st.rerun()
                     with col_no:
                         if st.button("❌ 駁回", key=f"rej_{item['id']}"):

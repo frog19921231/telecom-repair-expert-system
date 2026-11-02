@@ -180,20 +180,42 @@ with tab_user:
             else:
                 st.warning("該故障現象目前尚無關聯的推論路徑。")
 
-    # ----------------------------------------------------
-    # 現場回報區 (結合工單日期與模型線上演進)
+# ----------------------------------------------------
+    # 現場回報區 (結合施工日期、真因與必備工具)
     # ----------------------------------------------------
     if "current_paths" in st.session_state and st.session_state["current_paths"]:
         st.subheader("🛠️ 現場維修結果反饋")
         
-        repair_date = st.date_input("📅 施工/維修日期", help="記錄本次工單完工日期，供模型學習演進曲線分析")
+        col_fb1, col_fb2 = st.columns(2)
+        with col_fb1:
+            # 1. 施工日期
+            repair_date = st.date_input("📅 施工/維修日期", help="記錄本次工單完工日期")
         
+        # 取得推薦方案中的預設工具清單以供快速選取
+        all_suggested_tools = set()
+        for p in st.session_state["current_paths"]:
+            if p.get("所需工具"):
+                all_suggested_tools.update(p["所需工具"])
+        tool_options = list(all_suggested_tools) if all_suggested_tools else ["三用電表", "斜口鉗", "網路測線儀", "筆電終端機"]
+
+        with col_fb2:
+            # 2. 必備工具多選（可自由輸入新工具）
+            selected_tools = st.multiselect(
+                "🔧 本次施工使用之必備工具：",
+                options=tool_options,
+                default=tool_options[:2] if len(tool_options) >= 2 else tool_options,
+                help="記錄現場實際排除故障所使用的工具或儀表"
+            )
+
         options = [p["原因"] for p in st.session_state["current_paths"]] + ["以上皆非（提報現場新處置方案）"]
         chosen = st.radio("請勾選實際解決問題的原因：", options)
 
+        # 情境 A: 提報新方案
         if chosen == "以上皆非（提報現場新處置方案）":
             new_cause = st.text_input("輸入實際發現的故障原因")
             new_action = st.text_input("輸入採取的具體處置對策")
+            custom_tools_str = st.text_input("輸入自訂方案使用的必備工具 (多項請以逗號隔開)", value=", ".join(selected_tools))
+            
             if st.button("📩 提交至審核暫存庫"):
                 if new_cause and new_action:
                     c_query = """
@@ -204,32 +226,56 @@ with tab_user:
                         symptom: $symptom,
                         custom_cause: $cause,
                         custom_action: $action,
+                        tools: $tools,
                         repair_date: toString($repair_date),
                         created_at: datetime(),
                         status: 'PENDING_REVIEW'
                     })
                     CREATE (s)-[:HAS_PENDING_FEEDBACK]->(fb)
                     """
+                    parsed_tools = [t.strip() for t in custom_tools_str.split(",") if t.strip()]
                     with driver.session() as s:
-                        s.run(c_query, device=st.session_state["device"], sound=st.session_state["sound"], symptom=st.session_state["symptom"], cause=new_cause, action=new_action, repair_date=repair_date)
-                    st.success(f"已記錄施工日期（{repair_date}）並送出新方案至待審核暫存庫！")
+                        s.run(
+                            c_query, 
+                            device=st.session_state["device"], 
+                            sound=st.session_state["sound"], 
+                            symptom=st.session_state["symptom"], 
+                            cause=new_cause, 
+                            action=new_action, 
+                            tools=parsed_tools,
+                            repair_date=repair_date
+                        )
+                    st.success(f"已記錄施工日期與工具，並送出新方案至待審核暫存庫！")
                 else:
                     st.warning("請填寫完整原因與處置對策。")
+
+        # 情境 B: 現有選項命中
         else:
-            if st.button("✅ 確認回報並更新機率"):
+            if st.button("✅ 確認回報並更新工單"):
                 top1_cause = st.session_state["current_paths"][0]["原因"] if st.session_state["current_paths"] else ""
                 is_hit_top1 = 1 if chosen == top1_cause else 0
 
                 u_query = """
                 MATCH (s:Symptom {name: $symptom})-[target:CAUSED_BY]->(rc:RootCause {name: $cause})
+                
+                // 1. 建立包含施工日期與必備工具的工單實體
                 CREATE (mo:MaintenanceOrder {
                     repair_date: toString($repair_date),
                     symptom: $symptom,
                     actual_cause: $cause,
                     is_top1_hit: $is_hit_top1,
+                    tools: $tools,
                     created_at: datetime()
                 })
                 CREATE (s)-[:LOGGED_IN]->(mo)
+                
+                // 2. 建立工單與工具節點之關聯 (便於後續工具使用頻率統計)
+                FOREACH (t_name IN $tools |
+                    MERGE (t:Tool {name: t_name})
+                    MERGE (mo)-[:USED_TOOL]->(t)
+                )
+
+                // 3. 馬可夫轉移機率更新
                 SET target.count = coalesce(target.count, 0) + 1
                 WITH s
                 MATCH (s)-[all_rel:CAUSED_BY]->(:RootCause)
@@ -238,8 +284,15 @@ with tab_user:
                 SET r.prob = round((toFloat(r.count) / toFloat(total)) * 10000.0) / 10000.0
                 """
                 with driver.session() as s:
-                    s.run(u_query, symptom=st.session_state["symptom"], cause=chosen, repair_date=repair_date, is_hit_top1=is_hit_top1)
-                st.success(f"已記錄工單（{repair_date}）！原因「{chosen}」次數增加，馬可夫轉移機率已動態重新平衡。")
+                    s.run(
+                        u_query, 
+                        symptom=st.session_state["symptom"], 
+                        cause=chosen, 
+                        repair_date=repair_date, 
+                        is_hit_top1=is_hit_top1,
+                        tools=selected_tools
+                    )
+                st.success(f"✅ 工單記錄完成！施工日期：`{repair_date}` ｜ 記錄工具：`{', '.join(selected_tools)}`。轉移機率已動態重新平衡。")
 
 # ──────────────────────────────────────────
 # 分頁 2: 管理員專屬後台 (需驗證權限)

@@ -188,7 +188,7 @@ with tab_user:
 
         st.markdown("---")
 
-        # 逐一渲染推薦方案卡片，並在卡片內直接提供「一鍵完工結案」
+# 逐一渲染推薦方案卡片
         for idx, p in enumerate(paths, 1):
             prob_pct = round(p['機率'] * 100, 1)
             tools_str = ', '.join(p['所需工具']) if p['所需工具'] else '通用檢修工具'
@@ -201,19 +201,31 @@ with tab_user:
                 col_m3.metric("🔧 必備工具", tools_str)
                 st.info(f"👉 **建議處置作為**：{p['維修步驟']}")
                 
-                # 核心防呆：在處置 SOP 正下方放置一鍵完工按鈕
+                # ---------------------------------------------
+                # 結案按鈕區域 (必須在 with st.container() 內)
+                # ---------------------------------------------
                 col_btn, col_hint = st.columns([1, 3])
+                is_this_chosen = (st.session_state.get("resolved_cause") == p['原因'])
+                
                 with col_btn:
+                    # 1. 先在此定義並生成按鈕實例
                     btn_resolve = st.button(
-                        f"✅ 確認以此方案排除 (一鍵結案)", 
+                        f"✔️ 已採用此方案結案" if is_this_chosen else f"✅ 確認以此方案排除 (一鍵結案)", 
                         key=f"btn_resolve_{idx}",
-                        type="primary" if idx == 1 else "secondary"
+                        type="primary" if (idx == 1 and not st.session_state.get("is_resolved", False)) else "secondary",
+                        disabled=st.session_state.get("is_resolved", False)
                     )
+                
                 with col_hint:
-                    st.caption("點擊後自動記錄工單、回填必備工具並即時累進演算法機率。")
+                    if st.session_state.get("is_resolved", False):
+                        if is_this_chosen:
+                            st.caption("✅ 此工單已計入統計與轉移機率，資料庫已成功鎖定。")
+                    else:
+                        st.caption("點擊後自動記錄工單、回填必備工具並即時累進演算法機率。")
 
-if btn_resolve:
-                    if not st.session_state["saved_tech"]:
+                # 2. 緊接著在同一個 container 內判斷點擊事件 (注意此行縮排為 16 個空格)
+                if btn_resolve:
+                    if not st.session_state.get("saved_tech"):
                         st.warning("⚠️ 請先於上方填寫施工人員姓名後再點擊結案！")
                     else:
                         is_hit_top1 = 1 if idx == 1 else 0
@@ -255,9 +267,7 @@ if btn_resolve:
                                 tools=tools_to_log
                             )
                         
-                        # ---------------------------------------------
-                        # 👇 加入這裡：鎖定工單並清空施工人員輸入框
-                        # ---------------------------------------------
+                        # 鎖定狀態並清空施工人員
                         st.session_state["is_resolved"] = True
                         st.session_state["resolved_cause"] = p['原因']
                         st.session_state["saved_tech"] = ""
@@ -265,6 +275,8 @@ if btn_resolve:
                         
                         st.toast(f"🎉 工單已成功結案！施工人員欄位已自動清空。", icon="✅")
                         st.rerun()
+
+                st.markdown("---")
 
         # 方案皆非時的備用提報折疊區 (Expander)
 with st.expander("❓ 以上推薦皆非實際原因？（提報現場全新處置方案）"):

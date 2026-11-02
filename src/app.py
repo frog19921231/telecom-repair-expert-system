@@ -181,25 +181,24 @@ with tab_user:
                 st.warning("該故障現象目前尚無關聯的推論路徑。")
 
 # ----------------------------------------------------
-    # 現場回報區 (結合施工日期、真因與必備工具)
+    # 現場回報區 (串接優先序推薦，一鍵累進至統計)
     # ----------------------------------------------------
     if "current_paths" in st.session_state and st.session_state["current_paths"]:
-        st.subheader("🛠️ 現場維修結果反饋")
+        st.subheader("🛠️ 現場維修結果反饋與工單統計")
         
+        # 1. 施工日期與工具選取
         col_fb1, col_fb2 = st.columns(2)
         with col_fb1:
-            # 1. 施工日期
-            repair_date = st.date_input("📅 施工/維修日期", help="記錄本次工單完工日期")
+            repair_date = st.date_input("📅 施工/維修日期", help="記錄本次工單完工日期，供模型學習演進曲線分析")
         
-        # 取得推薦方案中的預設工具清單以供快速選取
+        # 彙整推論路徑中建議的必備工具
         all_suggested_tools = set()
         for p in st.session_state["current_paths"]:
             if p.get("所需工具"):
                 all_suggested_tools.update(p["所需工具"])
-        tool_options = list(all_suggested_tools) if all_suggested_tools else ["三用電表", "斜口鉗", "網路測線儀", "筆電終端機"]
+        tool_options = list(all_suggested_tools) if all_suggested_tools else ["網路壓線鉗", "RJ45水晶頭", "網路測線儀", "三用電表"]
 
         with col_fb2:
-            # 2. 必備工具多選（可自由輸入新工具）
             selected_tools = st.multiselect(
                 "🔧 本次施工使用之必備工具：",
                 options=tool_options,
@@ -207,11 +206,18 @@ with tab_user:
                 help="記錄現場實際排除故障所使用的工具或儀表"
             )
 
-        options = [p["原因"] for p in st.session_state["current_paths"]] + ["以上皆非（提報現場新處置方案）"]
-        chosen = st.radio("請勾選實際解決問題的原因：", options)
+        # 2. 格式化選項，明確帶出優先序與機率
+        raw_causes = [p["原因"] for p in st.session_state["current_paths"]]
+        display_options = []
+        for idx, p in enumerate(st.session_state["current_paths"], 1):
+            prob_pct = round(p["機率"] * 100, 1)
+            display_options.append(f"優先序 #{idx}：【{p['原因']}】 (先驗機率: {prob_pct}%)")
+        display_options.append("❓ 以上皆非（提報現場新處置方案）")
 
-        # 情境 A: 提報新方案
-        if chosen == "以上皆非（提報現場新處置方案）":
+        selected_display = st.radio("請勾選現場實際解決問題的真因：", display_options)
+
+        # 3. 處理提交邏輯
+        if selected_display == "❓ 以上皆非（提報現場新處置方案）":
             new_cause = st.text_input("輸入實際發現的故障原因")
             new_action = st.text_input("輸入採取的具體處置對策")
             custom_tools_str = st.text_input("輸入自訂方案使用的必備工具 (多項請以逗號隔開)", value=", ".join(selected_tools))
@@ -248,17 +254,19 @@ with tab_user:
                     st.success(f"已記錄施工日期與工具，並送出新方案至待審核暫存庫！")
                 else:
                     st.warning("請填寫完整原因與處置對策。")
-
-        # 情境 B: 現有選項命中
         else:
-            if st.button("✅ 確認回報並更新工單"):
-                top1_cause = st.session_state["current_paths"][0]["原因"] if st.session_state["current_paths"] else ""
-                is_hit_top1 = 1 if chosen == top1_cause else 0
+            # 解析被勾選的原始原因名稱
+            chosen_cause_idx = display_options.index(selected_display)
+            chosen_cause = raw_causes[chosen_cause_idx]
+
+            if st.button("✅ 確認回報並更新統計與機率"):
+                # 判定是否為 Top-1 命中
+                is_hit_top1 = 1 if chosen_cause_idx == 0 else 0
 
                 u_query = """
                 MATCH (s:Symptom {name: $symptom})-[target:CAUSED_BY]->(rc:RootCause {name: $cause})
                 
-                // 1. 建立包含施工日期與必備工具的工單實體
+                // 1. 建立工單記錄節點 (包含施工日期、Top-1 命中標記與工具)
                 CREATE (mo:MaintenanceOrder {
                     repair_date: toString($repair_date),
                     symptom: $symptom,
@@ -269,13 +277,13 @@ with tab_user:
                 })
                 CREATE (s)-[:LOGGED_IN]->(mo)
                 
-                // 2. 建立工單與工具節點之關聯 (便於後續工具使用頻率統計)
+                // 2. 建立工單與工具關聯
                 FOREACH (t_name IN $tools |
                     MERGE (t:Tool {name: t_name})
                     MERGE (mo)-[:USED_TOOL]->(t)
                 )
 
-                // 3. 馬可夫轉移機率更新
+                // 3. 馬可夫轉移次數累加並重新正規化機率
                 SET target.count = coalesce(target.count, 0) + 1
                 WITH s
                 MATCH (s)-[all_rel:CAUSED_BY]->(:RootCause)
@@ -287,12 +295,13 @@ with tab_user:
                     s.run(
                         u_query, 
                         symptom=st.session_state["symptom"], 
-                        cause=chosen, 
+                        cause=chosen_cause, 
                         repair_date=repair_date, 
                         is_hit_top1=is_hit_top1,
                         tools=selected_tools
                     )
-                st.success(f"✅ 工單記錄完成！施工日期：`{repair_date}` ｜ 記錄工具：`{', '.join(selected_tools)}`。轉移機率已動態重新平衡。")
+                st.success(f"🎉 工單記錄成功！【{chosen_cause}】統計次數已累加，先驗機率已自動重新配權。")
+                st.info("💡 側邊欄統計面板已同步更新，累積命中率可於管理員後台查看曲線。")
 
 # ──────────────────────────────────────────
 # 分頁 2: 管理員專屬後台 (需驗證權限)

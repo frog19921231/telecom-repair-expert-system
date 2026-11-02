@@ -163,8 +163,28 @@ with tab_user:
                 st.session_state["device"] = selected_device
                 st.session_state["sound"] = selected_sound
 
-            if paths:
+if paths:
                 st.success(f"🎯 針對【{selected_device} ➔ {selected_sound}】推論完成！推薦前 {len(paths)} 項最優先排查方案：")
+                
+                # 頂部顯示當前施工人員 (自動帶入記憶)
+                if "saved_tech" not in st.session_state:
+                    st.session_state["saved_tech"] = ""
+                
+                c_tech, c_date = st.columns([2, 1])
+                with c_tech:
+                    tech_val = st.text_input(
+                        "👷 當前施工人員 (全日自動帶入)：", 
+                        value=st.session_state["saved_tech"],
+                        placeholder="請輸入技師姓名/工號 (例: 陳技師)",
+                        key="current_tech_input"
+                    )
+                    st.session_state["saved_tech"] = tech_val.strip()
+                with c_date:
+                    repair_date = st.date_input("📅 維修日期", help="記錄工單完工日期")
+
+                st.markdown("---")
+
+                # 逐一渲染推薦方案卡片，並在卡片內直接提供「一鍵完工回報」
                 for idx, p in enumerate(paths, 1):
                     prob_pct = round(p['機率'] * 100, 1)
                     tools_str = ', '.join(p['所需工具']) if p['所需工具'] else '通用檢修工具'
@@ -176,6 +196,63 @@ with tab_user:
                         col_m2.metric("⏱️ 預估耗時", f"{p['耗時_分鐘']} 分鐘")
                         col_m3.metric("🔧 必備工具", tools_str)
                         st.info(f"👉 **建議處置作為**：{p['維修步驟']}")
+                        
+                        # ⭐ 核心防呆：在處置 SOP 正下方放置一鍵完工按鈕
+                        col_btn, col_hint = st.columns([1, 3])
+                        with col_btn:
+                            btn_resolve = st.button(
+                                f"✅ 確認以此方案排除 (一鍵結案)", 
+                                key=f"btn_resolve_{idx}",
+                                type="primary" if idx == 1 else "secondary"
+                            )
+                        with col_hint:
+                            st.caption("點擊後自動記錄工單、回填必備工具並即時累進演算法機率。")
+
+                        if btn_resolve:
+                            if not st.session_state["saved_tech"]:
+                                st.warning("⚠️ 請先於上方填寫施工人員姓名後再點擊結案！")
+                            else:
+                                is_hit_top1 = 1 if idx == 1 else 0
+                                tools_to_log = p['所需工具'] if p['所需工具'] else ["通用檢修工具"]
+
+                                u_query = """
+                                MATCH (s:Symptom {name: $symptom})-[target:CAUSED_BY]->(rc:RootCause {name: $cause})
+                                CREATE (mo:MaintenanceOrder {
+                                    repair_date: toString($repair_date),
+                                    technician: $technician,
+                                    symptom: $symptom,
+                                    actual_cause: $cause,
+                                    is_top1_hit: $is_hit_top1,
+                                    tools: $tools,
+                                    created_at: datetime()
+                                })
+                                CREATE (s)-[:LOGGED_IN]->(mo)
+                                MERGE (tech:Technician {name: $technician})
+                                MERGE (tech)-[:HANDLED]->(mo)
+                                FOREACH (t_name IN $tools |
+                                    MERGE (t:Tool {name: t_name})
+                                    MERGE (mo)-[:USED_TOOL]->(t)
+                                )
+                                SET target.count = coalesce(target.count, 0) + 1
+                                WITH s
+                                MATCH (s)-[all_rel:CAUSED_BY]->(:RootCause)
+                                WITH s, sum(all_rel.count) AS total, collect(all_rel) AS list
+                                UNWIND list AS r
+                                SET r.prob = round((toFloat(r.count) / toFloat(total)) * 10000.0) / 10000.0
+                                """
+                                with driver.session() as s:
+                                    s.run(
+                                        u_query,
+                                        symptom=selected_symptom,
+                                        cause=p['原因'],
+                                        technician=st.session_state["saved_tech"],
+                                        repair_date=repair_date,
+                                        is_hit_top1=is_hit_top1,
+                                        tools=tools_to_log
+                                    )
+                                st.success(f"🎉 工單已成功自動建檔！【{p['原因']}】次數 +1，模型機率已即時動態更新！")
+                                st.rerun()
+
                         st.markdown("---")
             else:
                 st.warning("該故障現象目前尚無關聯的推論路徑。")
